@@ -1,5 +1,5 @@
 """
-ESG RAG Hybrid Reranking Integrity Verification CLI.
+ESG RAG Hybrid Reranking Integrity Verification CLI (MariaDB Checklist & Risk Criteria Integrated).
 Provides an interactive command-line interface to submit validation questions,
 retrieve relevant documents, run strict numerical AI compliance rules, and log results.
 """
@@ -8,200 +8,324 @@ import sys
 import datetime
 import ollama
 from rank_bm25 import BM25Okapi
+import time
 
 # Import facade runners and core infrastructure
 try:
     import main
     from main import (
         search_similar_documents, 
-        get_db_connection, 
         simple_tokenizer
     )
+    # 제공된 mariadb_client 연동
+    import database.mariadb_client as db
 except ImportError:
-    safe_print("[오류] 'main.py' 파일을 찾을 수 없거나 연동에 실패했습니다.")
-    safe_print("이 검증 스크립트는 하이브리드 리랭킹 엔진이 구현된 main.py와 같은 폴더에 있어야 합니다.")
+    print("[오류] 'main.py' 또는 'database.mariadb_client' 파일을 찾을 수 없거나 연동에 실패했습니다.")
     sys.exit(1)
 
 from config.settings import settings
 from utils.helpers import safe_print
 
 # ────────────────────────────────────────────────────────
-# 1. BM25 Index Recovery Safeguard for Isolated Runs
+# 1. MariaDB Checklist & Risk Criteria Index Recovery Safeguard
 # ────────────────────────────────────────────────────────
 def check_and_ensure_bm25():
     """
-    verify_chatbot.py를 단독 실행했을 때 main.py의 BM25 인덱스가 메모리에 
-    로드되어 있지 않은 상태를 방지하기 위해 DB 전수조사 후 인덱스를 자동 복구합니다.
+    [MariaDB 하이브리드 동기화 구조]
+    메모리 내 BM25 인덱스가 유실되었거나 단독 실행되었을 때,
+    mariadb_client의 find_all 함수를 활용하여 데이터를 조회하고 복구합니다.
+    (dictionary=True 구조를 반영하여 안전하게 파싱합니다)
     """
     if getattr(main, 'bm25_index', None) is None:
-        safe_print("\n[안내] 메모리 내 BM25 인덱스가 유실되었거나 단독 실행되었습니다. 인덱스 복구를 시작합니다...")
+        safe_print("\n[안내] 메모리 내 BM25 인덱스가 유실되었거나 단독 실행되었습니다. MariaDB 전수 마스터 인덱스 복구를 시작합니다...")
         try:
-            conn = get_db_connection(settings.postgres_conn_str)
-            cur = conn.cursor()
+            reconstructed_chunks = []
+
+            # 🌟 1) esg_checklist 테이블 데이터 로드 (find_all 활용)
+            select_check_sql = """
+                SELECT indicator_no, category, indicator_name, question, pass_example, fail_example, action_plan 
+                FROM esg_checklist;
+            """
+            check_rows = db.find_all(select_check_sql)
             
-            # Extract all chunk records and metadata from the document store
-            cur.execute("SELECT content, source_file, source_type, page_or_row FROM esg_documents;")
-            rows = cur.fetchall()
-            cur.close()
-            conn.close()
+            if check_rows:
+                for row in check_rows:
+                    # mariadb_client가 dictionary=True 이므로 Key값으로 안전하게 접근합니다.
+                    ind_no = row.get("indicator_no", "")
+                    cat = row.get("category", "")
+                    ind_name = row.get("indicator_name", "")
+                    q = row.get("question", "")
+                    p_ex = row.get("pass_example", "")
+                    f_ex = row.get("fail_example", "")
+                    a_plan = row.get("action_plan", "")
+
+                    combined_content = (
+                        f"지표번호: {ind_no} | 분류: {cat} | 지표명: {ind_name} | 평가질문: {q} | "
+                        f"합격기준: {p_ex} | 불합격기준: {f_ex} | 대처방안: {a_plan}"
+                    )
+                    reconstructed_chunks.append({
+                        "content": combined_content,
+                        "source_file": "MariaDB esg_checklist 테이블",
+                        "source_type": "DB_Checklist",
+                        "page_or_row": ind_no,
+                        "indicator_no": ind_no,
+                        "category": cat,
+                        "indicator_name": ind_name,
+                        "question": q,
+                        "pass_example": p_ex,
+                        "fail_example": f_ex,
+                        "action_plan": a_plan
+                    })
+
+            # 🌟 2) esg_risk_criteria 테이블 데이터 로드 (find_all 활용)
+            select_risk_sql = """
+                SELECT item_name, high_risk, medium_risk, low_risk 
+                FROM esg_risk_criteria;
+            """
+            risk_rows = db.find_all(select_risk_sql)
             
-            if not rows:
-                safe_print("[경고] 데이터베이스에 구축된 지식(esg_documents)이 하나도 없습니다. main.py를 먼저 실행해 주세요.")
+            if risk_rows:
+                for r_idx, row in enumerate(risk_rows):
+                    i_name = row.get("item_name", "")
+                    h_risk = row.get("high_risk", "")
+                    m_risk = row.get("medium_risk", "")
+                    l_risk = row.get("low_risk", "")
+
+                    combined_risk = (
+                        f"리스크 평가분류항목: {i_name} | 고위험기준(High): {h_risk} | "
+                        f"중위험기준(Medium): {m_risk} | 저위험기준(Low): {l_risk}"
+                    )
+                    reconstructed_chunks.append({
+                        "content": combined_risk,
+                        "source_file": "MariaDB esg_risk_criteria 테이블",
+                        "source_type": "DB_Risk_Criteria",
+                        "page_or_row": f"CRITERIA_{r_idx+1}",
+                        "is_risk_matrix": True,
+                        "item_name": i_name,
+                        "high_risk": h_risk,
+                        "medium_risk": m_risk,
+                        "low_risk": l_risk
+                    })
+            
+            if not reconstructed_chunks:
+                safe_print("[경고] MariaDB 데이터베이스에 적재된 지식 컨텍스트가 전무합니다. 엑셀 업로더를 먼저 실행해 주세요.")
                 return False
                 
-            reconstructed_chunks = []
-            for row in rows:
-                reconstructed_chunks.append({
-                    "content": row[0],
-                    "source_file": row[1],
-                    "source_type": row[2],
-                    "page_or_row": row[3]
-                })
-            
-            # Synchronize into main facade (which syncs to search.hybrid_retriever)
+            # 토큰화 및 BM25 인덱스 동기화 빌드
             tokenized_corpus = [simple_tokenizer(chunk["content"]) for chunk in reconstructed_chunks]
             main.bm25_index = BM25Okapi(tokenized_corpus)
             main.global_chunks_pool = reconstructed_chunks
             
-            safe_print(f"[성공] DB 기반 고성능 BM25 인덱스 복구 완료 ({len(reconstructed_chunks)} 개 청크 매핑)")
+            safe_print(f"[성공] MariaDB 듀얼 테이블(지표 및 리스크 마스터) 통합 BM25 인덱스 빌드 완료! (총 {len(reconstructed_chunks)}개 컨텍스트 확보)")
             return True
         except Exception as e:
-            safe_print(f"[경고] BM25 인덱스 자동 복구 실패: {e}")
+            safe_print(f"[경고] MariaDB 기반 통합 BM25 인덱스 자동 복구 실패: {e}")
             return False
     return True
 
-# ────────────────────────────────────────────────────────
-# 2. Strict Numerical Verification Engine (Dense+Sparse Reranked)
-# ────────────────────────────────────────────────────────
 def get_integrity_checked_ai_response(model_name, query):
-    """
-    [하이브리드 리랭킹 정합성 검증 엔진]
-    1) main.py의 Dense+Sparse 하이브리드 리랭킹 검색 함수 호출로 최고 정합성 컨텍스트 확보
-    2) AI 프롬프트 주입 후 데이터 유실 검증 및 원인 분석 수행
-    """
-    # Ensure BM25 index is active
+    
+    # ⏱️ 구간 1: DB 및 BM25 체크 소요 시간 측정
+    t0 = time.time()
     check_and_ensure_bm25()
+    safe_print(f"⏱️ DB & BM25 체크 소요 시간: {time.time() - t0:.2f}초")
     
-    # Retrieve top 3 contexts utilizing hybrid dense-sparse search + reranking
-    retrieved_contexts = search_similar_documents(query, top_k=3, dense_n=10, sparse_n=10)
+    # ⏱️ 구간 2: 하이브리드 검색 및 리랭커 호출 (순수 쿼리 사용, 전수 검색 유도)
+    t1 = time.time()
+    retrieved_contexts = search_similar_documents(query, top_k=6, dense_n=50, sparse_n=50)
+    safe_print(f"⏱️ 하이브리드 검색 및 리랭커 소요 시간: {time.time() - t1:.2f}초")
     
+    # --- 컨텍스트 포맷팅 ---
     if not retrieved_contexts:
-        context = "⚠️ 현재 데이터베이스에 연관된 참고 자료가 전혀 존재하지 않습니다."
+        context = "⚠️ 현재 데이터베이스(MariaDB)에 연관된 지표 및 리스크 판정 참고 자료가 존재하지 않습니다."
     else:
         formatted_context_list = []
         for c_idx, ctx in enumerate(retrieved_contexts):
             search_channel = ctx.get('search_type', 'Hybrid')
-            formatted_context_list.append(
-                f"[참고 자료 {c_idx+1}] (출처: {ctx['source_file']} | 위치: {ctx['page_or_row']} | 채널: {search_channel})\n내용: {ctx['content']}"
-            )
+            if "indicator_no" in ctx:
+                formatted_context_list.append(
+                    f"[지표 스펙 {c_idx+1}] (코드: {ctx['indicator_no']} | 지표명: {ctx['indicator_name']})\n"
+                    f"  - 점검 질문 내용: {ctx['question']}\n"
+                    f"  - 합격 판정 기준 답변 예시: {ctx['pass_example']}\n"
+                    f"  - 불합격 위험 기준 답변 예시: {ctx['fail_example']}\n"
+                    f"  - 해당 지표 위험 감지 시 대처방안(Action Plan): {ctx['action_plan']}"
+                )
+            elif ctx.get("is_risk_matrix") is True:
+                formatted_context_list.append(
+                    f"[리스크 판정 마스터 기준 {c_idx+1}] (항목명: {ctx['item_name']})\n"
+                    f"  - 🔴 고위험 (High Risk) 기준: {ctx['high_risk']}\n"
+                    f"  - 🟡 중위험 (Medium Risk) 기준: {ctx['medium_risk']}\n"
+                    f"  - 🟢 저위험 (Low Risk) 기준: {ctx['low_risk']}"
+                )
+            else:
+                formatted_context_list.append(
+                    f"[참고 자료 {c_idx+1}] 내용을 그대로 준수하십시오:\n{ctx['content']}"
+                )
         context = "\n\n".join(formatted_context_list)
 
-    # Multi-rule strict data validation prompt injection
-    strict_prompt = f"""당신은 제공된 문서의 데이터 정합성 및 공정 규격을 철저히 검증하고 사후 조치 가이드를 제공하는 기업용 ESG 품질 실사 AI 어시스턴트입니다.
+# 🔍 [범용 공급망 ESG 자가진단 및 리스크 매트릭스 검증 엔진 프롬프트]
+    strict_prompt = f"""당신은 알루미늄 공급망 Upstream(원자재 채굴, Bayer 정련, Hall 제련, 1차 합금화·압연)의 품질 및 ESG 정합성을 대조 검증하는 AI 실사 수석 감사관입니다.
+    절대로 가상의 데이터베이스 구조 설계(CREATE TABLE 등)나 개발자 지향적인 SQL 쿼리 자문 답변을 작성하지 마십시오. 오직 실무 대응 지침 리포트 양식만 출력해야 합니다.
 
-[지침 명령어 - 필수 준수]
-1. 입력된 [사용자 질문]이 제공된 [참고 문서]의 지식 범위 안에서 답변이 가능한지 선제적으로 판단하십시오.
+    [가장 중요한 핵심 지침 명령어 - 무조건 복종]
+    1. [대상 지표 및 입력 수치 파악]:
+    - [사용자 질문]에서 검증하고자 하는 핵심 성분, 품질 스펙 또는 ESG 관리 지표(예: 규소, 망간, 탄소집약도, 유해물질 등)와 사용자가 입력한 현재 '기입 값(수치 및 답변 문맥)'을 명확히 추출하십시오.
 
-2. [★핵심 - 수치 대소 비교 및 규격 판정 룰]:
-   - 사용자 질문에 특정 수치(예: 0.25%, 100Mpa)가 포함되어 있고, 참고 문서에 해당 숫자 자체가 직접 언급되지 않았더라도, 해당 항목의 **'기준 범위(예: 0.05% ~ 0.20%)'나 '합격 규격'**이 명시되어 있다면 절대 '데이터가 없다'며 거절하지 마십시오.
-   - 참고 문서의 오차 범위/기준치를 바탕으로 사용자의 질문 속 수치와 **수학적 대소 비교(>, <, =, )를 직접 수행**하십시오.
-   - 비교 결과 기준치를 미달하거나 초과한다면, "문서상 규격 범위(X ~ Y)를 벗어난 수치이므로 규격 이탈(불합격) 상황"임을 논리적으로 추론하여 명확한 검증 답변을 제공하십시오.
+    2. [DB 마스터 기준값 및 우선순위 매칭]:
+    - 제공된 [참고 데이터]에서 해당 지표에 매칭되는 '합격 기준 답변(예시)' 및 '불합격 위험 기준 답변(예시)'에 명시된 숫자식(예: >=99.35%, >0.60%, >0.8 등)과 해당 지표의 '우선순위(Critical, High, Medium)'를 파악하십시오.
 
-3. [★신규 - 불합격 시 대처방안 및 조치사항 연계 룰]:
-   - 위 2번 규칙에 의해 **'규격 이탈(불합격)' 혹은 '스펙 초과/미달'로 판정될 경우, 제공된 [참고 문서] 내부에서 `[불합격 시 대처방안]`, `[조치 사항]`, `[해결책]`, `[격리/재보정]` 등과 관련된 속성값이나 관련 기술 내용을 반드시 샅샅이 검색**하십시오.
-   - 불합격 판정 하단에 **`[문서 기반 후속 대처방안]`**이라는 항목을 별도로 개설하여, 참고 문서에 기록된 대응 프로세스(예: 원료 투입량 재보정, 해당 로트 격리, 공급사 패널티 등)를 누락 없이 매칭하여 상세히 기술하십시오.
+    3. [다차원 수치 비교 및 합격/불합격 판정]:
+    - 사용자가 입력한 '기입 값'과 DB에서 찾아낸 '합격/불합격 기준 수치'를 수학적·논리적으로 대조 연산하십시오.
+    - 기입 값이 합격 범위를 충족하면 **[최종 판정 결과: 합격 (PASS)]**으로 판정하십시오.
+    - 기입 값이 불합격 위험 임계치를 초과/미달하거나 부합하면 **[최종 판정 결과: 불합격 (FAIL)]**으로 엄격히 판정하십시오.
 
-4. 질문 내용이 [참고 문서]에 명시된 도메인과 완전히 무관하거나, 대소 비교를 할 수 있는 최소한의 기준 수치조차 문서에 없다면, 그때만 아래 3가지 요소를 포함하여 답변하십시오:
-   - [감지 및 거절]: 제공된 참고 문서의 범위를 벗어난 질문임을 명확히 안내.
-   - [이유 설명]: 현재 데이터베이스(DB) 컨텍스트에 어떤 데이터가 누락되었거나 부족한지 논리적 원인 분석.
-   - [해결책 제시]: 추후 데이터베이스에 '추가로 적재해야 하는 원본 데이터나 가이드라인의 종류'를 구체적으로 제안.
+    4. [글로벌 리스크 등급 확정 (리스크 분류 기준 100% 매핑)]:
+    - 판정 결과가 **[불합격 (FAIL)]**인 경우, 제공된 [리스크 판정 마스터 기준]의 5가지 범주(우선순위 기준, 규제 영향, 재무 리스크, 공급망 영향, 조치 기한)를 대조하여 최종 리스크 등급을 **[고위험 🔴] / [중위험 🟡] / [저위험 🟢]** 중 하나로 확정하십시오.
+    * 필수 매핑 규칙: 'Critical' 지표에서 불합격했거나, CSDDD/UFLPA/FEOC 직접 위반 혹은 대체 소싱 불가능 사유에 걸릴 경우 무조건 **[고위험 🔴]**으로 확정해야 합니다.
 
-[참고 문서]
-{context}
+    5. [위험 대응 및 해결 리포트 작성]:
+    - 판정이 **[불합격 (FAIL)]**인 경우, [참고 데이터] 내 해당 지표의 `[불합격 시 대처방안]`에 명시된 구체적인 실무 행동 지침(원문에 정의된 내용)을 파악하십시오.
+    - 파악한 대처방안을 생략하지 말고 **순번 기호(①, ②, ③...)를 사용하여 단계별로 명확하게 기입**하고, 마스터 기준의 [조치 기한](예: 즉시 조치 D+3~D+7, 30일 내 개선 계획 제출 등)과 연계하여 리포트를 완성하십시오.
 
-[사용자 질문]
-{query}
-"""
+    [리포트 출력 포맷 양식 - 반드시 이 규격만 출력할 것]
+    --------------------------------------------------
+    ■ 대상 지표/성분: [예: 알루미나(Al₂O₃) 순도]
+    ■ 입력 데이터 vs DB 기준치: [예: 97.5% vs 기준치 99.35% 이상]
+    ■ 우선순위 등급: [예: Critical 또는 High]
+    ■ 최종 판정 결과: [합격(PASS) 또는 불합격(FAIL)]
+    ■ 확정 리스크 등급: [예: 고위험 🔴 (Critical 지표 불합격 및 공급 중단 리스크 반영)]
+
+    [위험 대응 및 해결 리포트]
+    (※ 불합격 시에만 작성, 합격 시에는 '- 기준 이내 정상 확인 (특이사항 없음)'으로 기재)
+    - [대상 지표/성분명]이 마스터 불합격 기준 조건을 이탈하여 다음과 같이 실무 긴급 조치를 발령함:
+    ① [DB에서 찾은 대처방안 1단계]
+    ② [DB에서 찾은 대처방안 2단계]
+    ③ [DB에서 찾은 대처방안 3단계]
+    
+    ■ 후속 조치 권고 기한: [예: 즉시 조치 (D+3~D+7) 및 경영진 에스컬레이션 필수]
+    --------------------------------------------------
+
+    [참고 데이터 (MariaDB 실시간 연동 데이터셋)]
+    {context}
+
+    [사용자 질문]
+    {query}
+    """
+#     # 🔍 [범용 수치 검증 엔진 고도화 프롬프트]
+#     strict_prompt = f"""당신은 공급망(Upstream) 원자재, 전처리, 성형 공정의 품질 및 ESG 수치 정합성을 대조 검증하는 AI 수석 감사관입니다.
+# 절대로 가상의 데이터베이스 스키마를 설계하거나 SQL 쿼리를 제안하는 기술 자문을 하지 마십시오. 오직 수치 대조 결과와 실무 이행 리포트만 작성하십시오.
+
+# [가장 중요한 핵심 지침 명령어 - 무조건 복종]
+# 1. [대상 성분 및 기입 수치 추출]:
+#    - [사용자 질문]에서 검증하고자 하는 핵심 성분/지표(예: 규소, 구리, 탄소 등)와 사용자가 입력한 현재 '기입 숫자(수치)'를 정확히 파악하십시오.
+
+# 2. [DB 마스터 기준값 검색 및 변환]:
+#    - 제공된 [참고 데이터]에서 해당 성분/지표에 매칭되는 '합격 판정 기준' 또는 '불합격 위험 기준'에 명시된 기준값(수치식 및 임계치)을 검색하여 숫자로 추출하십시오.
+
+# 3. [다차원 수치 비교 및 합격/불합격 판정]:
+#    - 사용자가 입력한 '기입 숫자'와 DB에서 찾아낸 '기준값'을 수학적으로 비교 연산하십시오.
+#    - 기입 숫자가 합격 범위를 충족하면 **[최종 결과: 합격 (PASS)]**으로 판정하십시오.
+#    - 기입 숫자가 불합격 위험 기준(임계치 초과 또는 미달)에 걸린다면 **[최종 결과: 불합격 (FAIL)]**으로 엄격히 판정하십시오.
+
+# 4. [불합격 시 리스크 해결 리포트 작성 룰]:
+#    - 판정 결과가 **[불합격 (FAIL)]**인 경우, 해당 성분/지표에 대해 [참고 데이터] 내에 정의된 `[해당 지표 위험 감지 시 대처방안(Action Plan)]`의 구체적인 실무 행동 지침을 누락 없이 파악하십시오.
+#    - 파악한 대처방안을 반드시 원문 양식에 맞추어 **순번 기호(①, ②, ③...)를 사용하여 단계별로 명확하게 기입**하십시오.
+
+# [리포트 출력 포맷 양식]
+# --------------------------------------------------
+# ■ 대상 지표/성분: [예: 규소(Si)]
+# ■ 입력 수치 vs DB 기준치: [예: 0.90% vs 기준치 0.60% 이하]
+# ■ 최종 판정 결과: [합격(PASS) 또는 불합격(FAIL)]
+
+# [위험 대응 및 해결 리포트]
+# (※ 불합격 시에만 작성, 합격 시에는 '기준 이내 정상 확인'으로 대체)
+# - [해당 성분명] 함량이 기준값보다 높아 다음과 같이 조치함:
+#   ① [DB에서 찾은 대처방안 1단계]
+#   ② [DB에서 찾은 대처방안 2단계]
+#   ③ [DB에서 찾은 대처방안 3단계]
+# --------------------------------------------------
+
+# [참고 데이터 (MariaDB 실시간 연동 데이터셋)]
+# {context}
+
+# [사용자 질문]
+# {query}
+# """
 
     try:
-        # Resolve ollama client safely from main facade
+        # ⏱️ 구간 3: Ollama LLM 생성
+        t2 = time.time()
         client = getattr(main, 'ollama_client', ollama)
         response = client.generate(model=model_name, prompt=strict_prompt)
+        safe_print(f"⏱️ Ollama LLM 추론 소요 시간: {time.time() - t2:.2f}초")
+        
         ai_answer = response['response']
         
-        # Rule-based compliance audit categorization (PASS / PARTIAL / FAIL)
-        detection_keywords = ["범위", "포함되어 있지", "제공된 문서", "확인할 수 없", "제한", "알 수 없", "누락"]
-        solution_keywords = ["추가", "적재", "확보", "제시", "해결", "필요", "자료", "보완"]
+        # --- 후속 분류 및 상태 체크 키워드 트래킹 ---
+        is_matrix_mapped = any(kw in ai_answer for kw in ["합격", "불합격", "PASS", "FAIL", "vs"])
+        is_action_linked = any(kw in ai_answer for kw in ["리포트", "대처방안", "액션 플랜", "①"])
         
-        detected = any(kw in ai_answer for kw in detection_keywords)
-        solution_provided = any(kw in ai_answer for kw in solution_keywords)
-        
-        if detected and solution_provided:
-            status = "정합성 통과 (PASS - 범위 이탈 감지 및 해결책 제시 완료)"
-        elif detected:
-            status = "부분 통과 (PARTIAL - 이탈은 감지했으나 구체적 해결책 미흡)"
+        if is_matrix_mapped and is_action_linked:
+            status = "정합성 완벽 통과 (PASS)"
         else:
-            status = "일반 답변 또는 검증 확인 요망 (정상 답변 혹은 할루시네이션 확인 필요)"
+            status = "일반 답변 또는 검증 요망"
             
         return ai_answer, status
 
     except Exception as e:
-        return f"AI 답변 생성 중 오류가 발생했습니다: {e}", "오류 발생 (ERROR)"
+        return f"AI 크로스 검증 답변 생성 중 치명적인 오류가 발생했습니다: {e}", "오류 발생 (ERROR)"
 
 # ────────────────────────────────────────────────────────
 # 3. Interactive CLI Loop & Disk Logging
 # ────────────────────────────────────────────────────────
 def record_and_run_verification(model_name):
-    safe_print("\n" + "="*60)
-    safe_print(f"🤖 [ESG RAG 하이브리드 리랭킹 정합성 검증 모드] 활성화 (모델: {model_name})")
-    safe_print("  • 1단계 (pgvector + BM25) 및 2단계 (Cross-Encoder) 엔진이 연동되어 작동합니다.")
-    safe_print("  • 데이터 누락 테스트 및 OOD(이상치) 입력 시 대안 제안 능력을 모니터링합니다.")
+    safe_print("\n" + "="*75)
+    safe_print(f"🤖 [ESG RAG MariaDB 지표셋 X 리스크 매트릭스 크로스 검증 CLI] (모델: {model_name})")
+    safe_print("  • MariaDB 내 esg_checklist와 esg_risk_criteria 마스터 테이블이 하이브리드 벡터 검색에 실시간 바인딩됩니다.")
+    safe_print("  • 수치 이탈 검증과 동시에 글로벌 리스크 기준표 기반 등급(고/중/저) 판정을 모니터링합니다.")
     safe_print("  • 종료하려면 '종료' 또는 'q'를 입력하세요.")
-    safe_print("="*60)
+    safe_print("="*75)
     
-    log_file = "rag_integrity_test_log.txt"
+    log_file = "esg_cross_integrity_audit_log.txt"
     
     while True:
         try:
-            query = input("\n[검증할 질문 입력]: ").strip()
+            query = input("\n[실사 질문 또는 수치 검증 데이터 입력]: ").strip()
         except KeyboardInterrupt:
-            safe_print("\n👋 정합성 검증 시스템을 종료합니다.")
+            safe_print("\n👋 크로스 정합성 검증 시스템을 종료합니다.")
             break
             
         if not query:
             continue
         if query.lower() in ['종료', 'q', 'quit', 'exit']:
-            safe_print("👋 정합성 검증 시스템을 종료합니다.")
+            safe_print("👋 크로스 정합성 검증 시스템을 종료합니다.")
             break
             
-        safe_print(f"\n🔍 [Hybrid Search + Reranker] 고속 입체 연산 중...")
+        safe_print(f"\n🔍 [듀얼 마스터 테이블 다차원 대조 연산 + 하이브리드 리랭커 작동 중]...")
         ai_response, detection_status = get_integrity_checked_ai_response(model_name, query)
         
-        # Console output
-        safe_print("\n" + "-"*50)
-        safe_print(f"📊 [정합성 평가]: {detection_status}")
-        safe_print("-" * 50)
+        # 콘솔 가독성 출력
+        safe_print("\n" + "📊" + "-"*65)
+        safe_print(f" 정합성 평가 결과: {detection_status}")
+        safe_print("-" * 67)
         safe_print(ai_response)
-        safe_print("-" * 50)
+        safe_print("-" * 67)
         
-        # Record findings onto disk log
+        # 디스크 파일 검증 기록 아카이빙
         try:
             with open(log_file, "a", encoding="utf-8") as f:
-                f.write(f"=== [검증 일시: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ===\n")
-                f.write(f"사용자 질문: {query}\n")
-                f.write(f"감지 상태: {detection_status}\n")
-                f.write(f"AI 답변 및 해결책:\n{ai_response}\n")
-                f.write("="*60 + "\n\n")
-            safe_print(f"💾 하이브리드 검증 결과가 '{log_file}'에 안전하게 기록되었습니다.")
+                f.write(f"=== [크로스 감사 일시: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ===\n")
+                f.write(f"감사 질문(데이터 입력): {query}\n")
+                f.write(f"인프라 정합성 스태터스: {detection_status}\n")
+                f.write(f"AI 수석 감사관 최종 리포트:\n{ai_response}\n")
+                f.write("="*75 + "\n\n")
+            safe_print(f"💾 크로스 검증 리포트가 '{log_file}'에 영구 저장되었습니다.")
         except Exception as e:
-            safe_print(f"⚠️ 로그 저장 실패: {e}")
+            safe_print(f"⚠️ 감사 로그 디스크 저장 실패: {e}")
 
-# ────────────────────────────────────────────────────────
+
+
 # CLI Entry Point
-# ────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Load target model from unified settings or fallback to CLI default
     TARGET_MODEL = settings.verify_ollama_model
-    
-    # Run loop
     record_and_run_verification(TARGET_MODEL)

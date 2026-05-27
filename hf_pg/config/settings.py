@@ -3,7 +3,7 @@ from pydantic import Field
 
 class Settings(BaseSettings):
     # MariaDB Configuration
-    maria_db_user: str = Field(default="user")
+    maria_db_user: str = Field(default="root")
     maria_db_password: str = Field(default="1234")
     maria_db_host: str = Field(default="localhost")
     maria_db_database: str = Field(default="edu")
