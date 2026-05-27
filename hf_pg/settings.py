@@ -1,19 +1,5 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-class Settings(BaseSettings):
-   # --------------------------
-  # db.py
-  # --------------------------
-  maria_db_user: str
-  maria_db_password: str
-  maria_db_host: str
-  maria_db_database: str
-  maria_db_port: int
-
-
-  model_config = SettingsConfigDict(
-    env_file=".env",
-    env_file_encoding="utf-8",
-  )
-
-settings = Settings()
+"""
+Backwards-compatibility wrapper for Settings.
+Imports the consolidated Pydantic settings from config/settings.py.
+"""
+from config.settings import settings, Settings

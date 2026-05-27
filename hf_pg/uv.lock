@@ -772,6 +772,7 @@ dependencies = [
     { name = "huggingface-hub" },
     { name = "langchain-huggingface" },
     { name = "langchain-postgres" },
+    { name = "mariadb" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "ollama" },
@@ -781,6 +782,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg2-binary" },
     { name = "pyarrow" },
+    { name = "pydantic-settings" },
     { name = "pypdf" },
     { name = "rank-bm25" },
     { name = "sentence-transformers" },
@@ -793,6 +795,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=1.16.1" },
     { name = "langchain-huggingface", specifier = ">=1.2.2" },
     { name = "langchain-postgres", specifier = ">=0.0.17" },
+    { name = "mariadb", specifier = ">=1.1.14" },
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "ollama", specifier = ">=0.6.2" },
     { name = "openpyxl", specifier = ">=3.1.5" },
@@ -800,6 +803,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "psycopg2-binary", specifier = ">=2.9.12" },
     { name = "pyarrow", specifier = ">=24.0.0" },
+    { name = "pydantic-settings", specifier = ">=2.14.1" },
     { name = "pypdf", specifier = ">=6.12.0" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
     { name = "sentence-transformers", specifier = ">=5.5.1" },
@@ -1020,6 +1024,27 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/17/eb/8883d1158c743d0aac350f09df7880714d27283497e8c80bb9fe3480f165/langsmith-0.8.5.tar.gz", hash = "sha256:3615243d99c12f4047f13042bdc05a373dce232d106a6511b3ca7b48c5af1c2c", size = 4462348, upload-time = "2026-05-15T21:31:41.093Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/23/85/968c88a63e32a59b3e5c68afd2fe114ce0708a125db0be1a85efc25fb2ea/langsmith-0.8.5-py3-none-any.whl", hash = "sha256:efc779f9d450dcaf9d97bc8894f4926276509d6e730e05289af9a64debce06ae", size = 399564, upload-time = "2026-05-15T21:31:39.046Z" },
+]
+
+[[package]]
+name = "mariadb"
+version = "1.1.14"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c4/ba/cedef19833be88e07bfff11964441cda8a998f1628dd3b2fa3e7751d36e0/mariadb-1.1.14.tar.gz", hash = "sha256:e6d702a53eccf20922e47f2f45cfb5c7a0c2c6c0a46e4ee2d8a80d0ff4a52f34", size = 111715, upload-time = "2025-10-07T06:45:48.017Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/bf/5e1a3a5be297c3a679e08f5359165491508fbfb64faf854dc1d626cea9c0/mariadb-1.1.14-cp310-cp310-win32.whl", hash = "sha256:4c7f33578da163a1b79929aae241f5f981d7b9d5a94d89e589aad7ec58e313ea", size = 185064, upload-time = "2025-10-07T06:45:24.858Z" },
+    { url = "https://files.pythonhosted.org/packages/31/30/3a61991c13cb8257f5db64aca12bafaa3d811d407e1fae019139fd17c99b/mariadb-1.1.14-cp310-cp310-win_amd64.whl", hash = "sha256:3f6fdc4ded5e0500a6a29bf0c8bf1be94189dcef5a8d5e0e154a4b3456f86bcc", size = 202020, upload-time = "2025-10-07T06:45:27.785Z" },
+    { url = "https://files.pythonhosted.org/packages/56/aa/a7b3c66b2792e8319ec9157d63851ff2e0b26496a05044e22b50a012a05e/mariadb-1.1.14-cp311-cp311-win32.whl", hash = "sha256:932a95016b7e9b8d78893aa5ee608e74199e3c6dd607dbe5e4da2010a4f67b88", size = 185061, upload-time = "2025-10-07T06:45:29.964Z" },
+    { url = "https://files.pythonhosted.org/packages/54/04/ea2374867756b4082764484bc8b82e1798d94f171bcc914e08c60d640f8f/mariadb-1.1.14-cp311-cp311-win_amd64.whl", hash = "sha256:55ddbe5272c292cbcb2968d87681b5d2b327e65646a015e324b8eeb804d14531", size = 202016, upload-time = "2025-10-07T06:45:32.151Z" },
+    { url = "https://files.pythonhosted.org/packages/00/04/659a8d30513700b5921ec96bddc07f550016c045fcbeb199d8cd18476ecc/mariadb-1.1.14-cp312-cp312-win32.whl", hash = "sha256:98d552a8bb599eceaa88f65002ad00bd88aeed160592c273a7e5c1d79ab733dd", size = 185266, upload-time = "2025-10-07T06:45:34.164Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/a9/8f210291bc5fc044e20497454f40d35b3bab326e2cab6fccdc38121cb2c1/mariadb-1.1.14-cp312-cp312-win_amd64.whl", hash = "sha256:685a1ad2a24fd0aae1c4416fe0ac794adc84ab9209c8d0c57078f770d39731db", size = 202112, upload-time = "2025-10-07T06:45:35.824Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/42/51130048bcce038bb859978250515f1aad90e9c4d273630a704e0a8b1ae1/mariadb-1.1.14-cp313-cp313-win32.whl", hash = "sha256:3d2c795cde606f4e12c0d73282b062433f414cae035675b0d81f2d65c9b79ac5", size = 185221, upload-time = "2025-10-07T06:45:37.848Z" },
+    { url = "https://files.pythonhosted.org/packages/af/23/e952a7e442913abd8079cd27b80b69474895c93b3727fad41c7642a80c62/mariadb-1.1.14-cp313-cp313-win_amd64.whl", hash = "sha256:7fd603c5cf23c47ef0d28fdc2b4b79919ee7f75d00ed070d3cd1054dcf816aeb", size = 202121, upload-time = "2025-10-07T06:45:39.453Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/f2/7059f83543a4264b98777d7cc8aa203e1ca6a13a461f730d1c97f29628d4/mariadb-1.1.14-cp314-cp314-win32.whl", hash = "sha256:1a50b4612c0dd5b69690cebb34cef552a7f64dcadeb5aa91d70cd99bf01bc5b3", size = 190620, upload-time = "2025-10-07T06:45:41.349Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/7c/7e094b0b396d742494f6346f2ffa9709e429970b0461aca50526f5f02f12/mariadb-1.1.14-cp314-cp314-win_amd64.whl", hash = "sha256:6659725837e48fa6af05e20128fb525029f706f1921d5dbf639a25b2f80b9f93", size = 206263, upload-time = "2025-10-07T06:45:43.227Z" },
 ]
 
 [[package]]
@@ -2363,6 +2388,20 @@ wheels = [
 ]
 
 [[package]]
+name = "pydantic-settings"
+version = "2.14.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "python-dotenv" },
+    { name = "typing-inspection" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/07/60/1d1e59c9c90d54591469ada7d268251f71c24bdb765f1a8a832cee8c6653/pydantic_settings-2.14.1.tar.gz", hash = "sha256:e874d3bec7e787b0c9958277956ed9b4dd5de6a80e162188fdaff7c5e26fd5fa", size = 235551, upload-time = "2026-05-08T13:40:06.542Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ae/8d/f1af3832f5e6eb13ba94ee809e72b8ecb5eef226d27ee0bef7d963d943c7/pydantic_settings-2.14.1-py3-none-any.whl", hash = "sha256:6e3c7edfd8277687cdc598f56e5cff0e9bfff0910a3749deaa8d4401c3a2b9de", size = 60964, upload-time = "2026-05-08T13:40:04.958Z" },
+]
+
+[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2393,6 +2432,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427", size = 229892, upload-time = "2024-03-01T18:36:18.57Z" },
+]
+
+[[package]]
+name = "python-dotenv"
+version = "1.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/ed/0301aeeac3e5353ef3d94b6ec08bbcabd04a72018415dcb29e588514bba8/python_dotenv-1.2.2.tar.gz", hash = "sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3", size = 50135, upload-time = "2026-03-01T16:00:26.196Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0b/d7/1959b9648791274998a9c3526f6d0ec8fd2233e4d4acce81bbae76b44b2a/python_dotenv-1.2.2-py3-none-any.whl", hash = "sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a", size = 22101, upload-time = "2026-03-01T16:00:25.09Z" },
 ]
 
 [[package]]
