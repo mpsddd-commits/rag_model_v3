@@ -30,7 +30,7 @@ def _truncate_tables() -> None:
         safe_print(f"[경고] 테이블 초기화 예외: {e}")
 
 
-def _process_checklist_file(file_path: str, counters: dict, checklist_data: list) -> None:
+def _process_checklist_file(file_path: str, global_counter: list, checklist_data: list) -> None:
     """Parses any checklist Excel file and appends valid rows to checklist_data."""
     file_name = os.path.basename(file_path)
     try:
@@ -47,6 +47,20 @@ def _process_checklist_file(file_path: str, counters: dict, checklist_data: list
         df = df.fillna("")
         valid_rows = 0
 
+        # 시트 이름을 기반으로 partner_type 값을 4가지 규격으로 정제
+        raw_sheet = sheet_name.strip()
+        if "1차" in raw_sheet:
+            partner_type = "1차 협력사"
+        elif "2차" in raw_sheet:
+            partner_type = "2차 협력사"
+        elif "3차-A" in raw_sheet or "3차_A" in raw_sheet or "3차 A" in raw_sheet:
+            partner_type = "3차-A"
+        elif "3차-B" in raw_sheet or "3차_B" in raw_sheet or "3차 B" in raw_sheet:
+            partner_type = "3차-B"
+        else:
+            # 기본 예외 처리 (매칭되지 않을 경우 시트명 원본의 앞부분 일부 사용 혹은 기본값 지정)
+            partner_type = raw_sheet[:10]
+
         for _, row in df.iterrows():
             if len(row) < 6:
                 continue
@@ -62,32 +76,25 @@ def _process_checklist_file(file_path: str, counters: dict, checklist_data: list
                 return str(row[i]).strip() if len(row) > i and str(row[i]).strip() else default
 
             priority = _col(3, "High")
-            star_yn_raw = _col(4)
-            star_yn = "Y" if "★" in star_yn_raw or "Y" in star_yn_raw.upper() else "N"
+            is_essential_raw = _col(4)
+            star_yn = "Y" if "★" in is_essential_raw or "Y" in is_essential_raw.upper() else "N"
             question = _col(5)
-            pass_criteria = _col(6)
-            fail_criteria = _col(7)
+            pass_answer = _col(6)
+            fail_answer = _col(7)
             risk_level = _col(8)
             evidence_req_raw = _col(9)
-            evidence_required = "Y" if "Y" in evidence_req_raw.upper() or "예" in evidence_req_raw else "N"
+            evidence_yn = "Y" if "Y" in evidence_req_raw.upper() or "예" in evidence_req_raw else "N"
             evidence_list = _col(10)
             action_plan = _col(11)
 
-            if any(x in category for x in ["환경", "공정", "품질", "화학", "기후", "에너지"]):
-                prefix = "ENV"
-            elif any(x in category for x in ["인권", "노동", "사회", "안전", "보건"]):
-                prefix = "SOC"
-            else:
-                prefix = "GOV"
-
-            clean_sheet = sheet_name.replace(" ", "_").replace("-", "_")
-            indicator_no = f"{prefix}-{clean_sheet}-{counters[prefix]:03d}"
-            counters[prefix] += 1
+            # indicator_no가 DDL상 INT형이므로 1부터 시작하는 순차적인 정수값 부여
+            indicator_no = global_counter[0]
+            global_counter[0] += 1
 
             checklist_data.append((
-                indicator_no, category, indicator_name, priority, star_yn,
-                question, pass_criteria, fail_criteria, risk_level,
-                evidence_required, evidence_list, action_plan,
+                partner_type, indicator_no, category, indicator_name, priority, star_yn,
+                question, pass_answer, fail_answer, risk_level,
+                evidence_yn, evidence_list, action_plan,
             ))
             valid_rows += 1
 
@@ -139,7 +146,9 @@ def upload_excel_to_db(excel_dir: str = "esg_excel_files") -> bool:
 
     checklist_data: list = []
     risk_criteria_data: list = []
-    counters = {"ENV": 1, "SOC": 1, "GOV": 1}
+    
+    # INT형 고유 지표 번호 생성을 위한 가변 리스트 카운터 (1부터 시작)
+    global_counter = [1]
 
     for file_path in all_files:
         file_name = os.path.basename(file_path)
@@ -148,7 +157,7 @@ def upload_excel_to_db(excel_dir: str = "esg_excel_files") -> bool:
             _process_risk_criteria_file(file_path, risk_criteria_data)
         else:
             safe_print(f"[라우팅] 체크리스트 → {file_name}")
-            _process_checklist_file(file_path, counters, checklist_data)
+            _process_checklist_file(file_path, global_counter, checklist_data)
 
     _truncate_tables()
 
@@ -156,12 +165,13 @@ def upload_excel_to_db(excel_dir: str = "esg_excel_files") -> bool:
 
     if checklist_data:
         safe_print(f"[DB] SELF_ASSESS_CHECKLIST에 {len(checklist_data)}행 삽입 중...")
+        # 새로운 DDL 컬럼 구조 순서쌍과 완전히 일치하도록 쿼리 매핑 (총 13개 컬럼)
         ok_check = db.save_many(
             """INSERT INTO SELF_ASSESS_CHECKLIST
-               (indicator_no, category, indicator_name, priority, star_yn,
-                question, pass_example, fail_example, risk_level,
-                evidence_required, evidence_list, action_plan)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (partner_type, indicator_no, category, indicator_name, priority, star_yn,
+                question, pass_answer, fail_answer, risk_level,
+                evidence_yn, evidence_list, action_plan)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             checklist_data,
         )
 
@@ -184,8 +194,9 @@ def upload_excel_to_db(excel_dir: str = "esg_excel_files") -> bool:
 # ════════════════════════════════════════════════════════
 def search_checklist_row(query: str) -> dict | None:
     """BM25-based lookup of the single most relevant SELF_ASSESS_CHECKLIST row."""
+    # 변경된 컬럼 사양(pass_answer, fail_answer 등)을 반영하여 쿼리 수정
     rows = db.find_all(
-        "SELECT indicator_no, indicator_name, question, pass_example, fail_example, action_plan FROM SELF_ASSESS_CHECKLIST"
+        "SELECT indicator_no, indicator_name, question, pass_answer, fail_answer, action_plan FROM SELF_ASSESS_CHECKLIST WHERE delete_yn = 0"
     )
     if not rows:
         safe_print("[경고] SELF_ASSESS_CHECKLIST 데이터 없음.")
@@ -259,7 +270,7 @@ def process_esg_query(user_query: str, model_name: str | None = None) -> str:
     if not matched_row:
         return "질문과 관련된 ESG 체크리스트 항목을 찾을 수 없습니다."
 
-    safe_print(f"[시스템] 매칭 지표 → {matched_row['indicator_no']}: {matched_row['indicator_name']}")
+    safe_print(f"[시스템] 매칭 지표 번호 → {matched_row['indicator_no']}: {matched_row['indicator_name']}")
 
     status, base_val = extract_and_compare(user_query, matched_row["question"], model_name)
 

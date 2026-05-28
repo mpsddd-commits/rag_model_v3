@@ -15,9 +15,14 @@ class Settings(BaseSettings):
     # MariaDB
     maria_db_user: str = Field(default="root")
     maria_db_password: str = Field(default="1234")
-    maria_db_host: str = Field(default="aiedu.tplinkdns.com")
-    maria_db_database: str = Field(default="triplevalues")
-    maria_db_port: int = Field(default=55306)
+    maria_db_host: str = Field(default="localhost")
+    maria_db_database: str = Field(default="edu")
+    maria_db_port: int = Field(default=23306)
+    # maria_db_user: str = Field(default="root")
+    # maria_db_password: str = Field(default="1234")
+    # maria_db_host: str = Field(default="aiedu.tplinkdns.com")
+    # maria_db_database: str = Field(default="triplevalues")
+    # maria_db_port: int = Field(default=55306)
 
     # PostgreSQL
     postgres_user: str = Field(default="root")
