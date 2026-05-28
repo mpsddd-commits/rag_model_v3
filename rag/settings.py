@@ -32,11 +32,13 @@ class Settings(BaseSettings):
     postgres_port: int = Field(default=5432)
 
     # Models & Ollama
-    embed_model: str = Field(default="bge-m3")
-    rerank_model: str = Field(default="BAAI/bge-reranker-large")
     ollama_host: str = Field(default="http://localhost:11434")
+    # 에이전트 1: 초경량/초고속 모델 (수치 및 JSON 추출용)
+    extractor_model: str = Field(default="qwen3.5:0.8b")
     mariadb_ollama_model: str = Field(default="gemma4:e2b")
     verify_ollama_model: str = Field(default="qwen3.5:9b")
+    embed_model: str = Field(default="bge-m3")
+    rerank_model: str = Field(default="BAAI/bge-reranker-large")    
 
     @property
     def postgres_conn_str(self) -> str:

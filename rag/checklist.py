@@ -304,15 +304,17 @@ def process_esg_query(user_query: str, model_name: str | None = None) -> str:
 
     safe_print(f"\n[시스템] 유저 질문 접수: '{user_query}'")
 
+    # 1. 텍스트 매칭 (BM25)
     matched_row = search_checklist_row(user_query)
     if not matched_row:
         return "질문과 관련된 ESG 체크리스트 항목을 찾을 수 없습니다."
 
     safe_print(f"[시스템] 매칭 지표 번호 → {matched_row['indicator_no']}: {matched_row['indicator_name']}")
 
-    # 1. 판정 시작 시간 기록
+    # 판정 시작 시간 기록
     judgement_start = time.time()
 
+    # 2. 에이전트 1(경량) + 파이썬 연산 엔진 호출
     status, base_val = extract_and_compare(user_query, matched_row["question"], model_name)
 
     if status == "ERROR_NO_NUM":
@@ -323,9 +325,10 @@ def process_esg_query(user_query: str, model_name: str | None = None) -> str:
     judgement_duration = round(time.time() - judgement_start, 3)
     safe_print(f"[시스템] 판정 완료 → {status} (기준치: {base_val}) [수치 판정 소요: {judgement_duration}초]")
 
-    # 2. 가이드라인 생성 시작 시간 기록
+    # 가이드라인 생성 시작 시간 기록
     llm_start = time.time()
 
+    # 3. 에이전트 2(고성능): 최종 가이드라인 보고서 문장 생성
     final_prompt = f"""
 당신은 알루미늄 공급망 ESG 실사 전문가입니다.
 [진단 결과]와 [대처 방안]을 바탕으로 협력사 담당자에게 전달할 '공정 조치 지침 가이드라인'을 정중하고 명확하게 작성하세요.
@@ -342,6 +345,7 @@ def process_esg_query(user_query: str, model_name: str | None = None) -> str:
 - '합격'이라면 현재 품질을 유지하라는 정중한 멘트를 작성하세요.
 - '불합격'이라면 규격 이탈을 알리고 대처 방안의 핵심 조치를 가독성 좋게 정리하세요.
 """
+
     client = ollama.Client(host=settings.ollama_host)
     response = client.generate(model=model_name, prompt=final_prompt, options={"temperature": 0.5})
     final_answer = response["response"].strip()
@@ -387,7 +391,7 @@ if __name__ == "__main__":
         print("="*50)
         
         # 2. 테스트할 협력사 담당자의 가상 질문을 정의합니다.
-        test_query = "저희 Mn 함량이 1.6%가 나왔습니다. 기준에 맞나요?"
+        test_query = "저희 3003 합금 균질화 처리 시 온도 610도 12시간 유지 했습니다. 기준에 맞나요?"
         
         # 3. process_esg_query 함수를 호출하여 AI 진단을 수행합니다.
         #    (내부적으로 1.BM25 행 매칭 -> 2.AI 수치 분석 및 판정 -> 3.가이드라인 생성 -> 4.로그 저장이 모두 실행됨)
