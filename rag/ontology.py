@@ -4,7 +4,6 @@ Caches MariaDB master data into a fast Python lookup structure
 to eliminate per-query database and LLM reasoning bottlenecks.
 """
 import re
-import json
 import db
 from settings import safe_print
 
@@ -12,8 +11,6 @@ from settings import safe_print
 # { "지표명": { "indicator_no": "...", "action_plan": "...", "risk_criteria": {...}, "threshold_value": 60.0, "operator": ">=" } }
 _ONTOLOGY_REGISTRY: dict = {}
 
-# [추가] 미리 규격화된 템플릿(JSON/JSONL용) 구조를 저장할 전역 리스트
-_ONTOLOGY_TEMPLATE_LIST: list = []
 
 def parse_numeric_criteria(text_criteria: str) -> tuple[float | None, str]:
     """
@@ -41,22 +38,21 @@ def parse_numeric_criteria(text_criteria: str) -> tuple[float | None, str]:
 
 def load_ontology_registry() -> bool:
     """
-    MariaDB의 듀얼 마스터 테이블을 통합 바인딩한 후,
-    1) 인메모리 딕셔너리 캐시 구축
-    2) [추가] JSON/JSONL 변환용 표준 템플릿 리스트 구조를 미리 빌드
+    서버 혹은 CLI 시작 시 딱 한 번 실행되어 MariaDB의 듀얼 마스터 테이블을
+    통합 바인딩한 후, 파이썬 전역 딕셔너리에 온톨로지 구조로 캐싱합니다.
     """
-    global _ONTOLOGY_REGISTRY, _ONTOLOGY_TEMPLATE_LIST
+    global _ONTOLOGY_REGISTRY
     _ONTOLOGY_REGISTRY.clear()
-    _ONTOLOGY_TEMPLATE_LIST.clear() 
 
-    safe_print("[온톨로지] MariaDB 마스터 테이블 동기화 및 템플릿 빌드 중...")
+    safe_print("[온톨로지] MariaDB 마스터 테이블 동기화 및 인메모리 캐시 구축 중...")
     
     try:
+        # 두 테이블의 데이터를 지표명을 기준으로 결합하여 전수 로드
         sql = """
             SELECT 
                 c.indicator_name, 
                 c.indicator_no, 
-                c.question,
+                c.pass_example,
                 c.action_plan,
                 r.high_risk, 
                 r.medium_risk, 
@@ -67,7 +63,7 @@ def load_ontology_registry() -> bool:
         rows = db.find_all(sql)
         
         if not rows:
-            safe_print("[경고] MariaDB 마스터 데이터가 비어 있습니다.")
+            safe_print("[경고] MariaDB 마스터 데이터가 비어 있습니다. 엑셀 업로더를 먼저 실행하세요.")
             return False
 
         for row in rows:
@@ -75,12 +71,11 @@ def load_ontology_registry() -> bool:
             if not name:
                 continue
 
+            # pass_example 텍스트(ex: "60% 이상")에서 규칙 연산 수치 자동 파싱
             pass_ex = row.get("pass_example", "")
             threshold_val, operator = parse_numeric_criteria(pass_ex)
 
-            # --------------------------------------------------------
-            # 기능 A: 기존 온톨로지 사전 구조화 (0.001초 고속 매칭용)
-            # --------------------------------------------------------
+            # 온톨로지 사전 구조화
             _ONTOLOGY_REGISTRY[name] = {
                 "indicator_no": row.get("indicator_no", "N/A"),
                 "action_plan": row.get("action_plan", "대처방안 정보가 없습니다."),
@@ -93,65 +88,11 @@ def load_ontology_registry() -> bool:
                 }
             }
 
-            # --------------------------------------------------------
-            # 🌟 기능 B: [신규] JSON / JSONL 변환용 표준 템플릿 리스트 적재
-            # --------------------------------------------------------
-            # 대처방안 텍스트를 미리 깔끔하게 배열(List) 구조로 변환
-            raw_action = row.get("action_plan", "")
-            steps = [s.strip() for s in raw_action.split("\n") if s.strip()]
-            
-            # 원하는 형태의 템플릿 형식을 지정하여 사전(Dict) 객체 생성
-            template_item = {
-                "indicator_id": f"ESG-IND-{row.get('indicator_no', '000')}",
-                "indicator_name": name,
-                "compliance_rule": {
-                    "base_text": pass_ex,
-                    "parsed_threshold": threshold_val,
-                    "mathematical_operator": operator
-                },
-                "risk_matrix": {
-                    "high_risk_condition": row.get("high_risk", ""),
-                    "medium_risk_condition": row.get("medium_risk", ""),
-                    "low_risk_condition": row.get("low_risk", "")
-                },
-                "structured_action_plans": steps  # ['1단계 조치', '2단계 조치'] 형태의 깔끔한 리스트
-            }
-            
-            _ONTOLOGY_TEMPLATE_LIST.append(template_item)
-
-        safe_print(f"[성공] 고속 인메모리 온톨로지 및 {len(_ONTOLOGY_TEMPLATE_LIST)}개 템플릿 리스트 빌드 완료!")
+        safe_print(f"[성공] 고속 인메모리 온톨로지 사전 바인딩 완료! (총 {len(_ONTOLOGY_REGISTRY)}개 지표 활성화)")
         return True
 
     except Exception as e:
-        safe_print(f"[오류] 온톨로지 레지스트리 및 템플릿 빌드 실패: {e}")
-        return False
-
-
-# 🌟 [추가] 외부에서 빌드된 템플릿 리스트를 가져오는 함수
-def get_ontology_template_list() -> list[dict]:
-    """미리 파싱되어 저장된 JSON형태의 파이썬 리스트를 반환합니다."""
-    return _ONTOLOGY_TEMPLATE_LIST
-
-
-# 🌟 [추가] 데이터를 한 줄씩 JSON형태로 쪼갠 JSONL 파일로 바로 내보내는 내보내기 함수
-def export_to_jsonl(output_file_path: str = "esg_ontology_template.jsonl") -> bool:
-    """
-    메모리에 적재된 템플릿 리스트를 LLM 학습이나 데이터 이관용
-    JSONL(JSON Lines) 파일로 로컬 디렉토리에 저장합니다.
-    """
-    if not _ONTOLOGY_TEMPLATE_LIST:
-        safe_print("[경고] 내보낼 템플릿 데이터가 존재하지 않습니다. 먼저 로드하세요.")
-        return False
-        
-    try:
-        with open(output_file_path, "w", encoding="utf-8") as f:
-            for item in _ONTOLOGY_TEMPLATE_LIST:
-                # 내부 딕셔너리를 한 줄짜리 json 문자열로 변환하여 기록
-                f.write(json.dumps(item, ensure_ascii=False) + "\n")
-        safe_print(f"[완료] 온톨로지 데이터셋이 {output_file_path} 파일로 성공적으로 내보내졌습니다.")
-        return True
-    except Exception as e:
-        safe_print(f"[오류] JSONL 파일 생성 중 실패: {e}")
+        safe_print(f"[오류] 온톨로지 레지스트리 빌드 실패: {e}")
         return False
 
 
@@ -241,42 +182,3 @@ def evaluate_esg_compliance(indicator_name: str, user_value: float) -> dict:
         "risk_level": risk_level,
         "report_action": report_action.strip()
     }
-
-if __name__ == "__main__":
-    print("====== 온톨로지 동기화 및 데이터셋 추출 테스트 시작 ======")
-    
-    # 1. DB 동기화 및 인메모리 템플릿 빌드
-    is_success = load_ontology_registry()
-    
-    if is_success:
-        print("\n[성공] 데이터가 파이썬 메모리에 정상적으로 적재되었습니다.")
-        print(f"현재 등록된 총 지표 개수: {len(_ONTOLOGY_REGISTRY)}개")
-        
-        # --------------------------------------------------------
-        # 🌟 해결책 1: AI 학습 및 이관용 JSONL 파일 생성 함수 호출!!
-        # --------------------------------------------------------
-        # 함수를 실행해 주어야 드디어 폴더에 esg_ontology_template.jsonl 파일이 생깁니다.
-        export_to_jsonl("esg_ontology_template.jsonl")
-        
-        # --------------------------------------------------------
-        # 🌟 해결책 2: 실제 DB에 존재하는 지표명으로 매칭 테스트하기
-        # --------------------------------------------------------
-        # 사전에 등록된 55개 지표 중 첫 번째 진짜 지표명을 자동으로 가져와 테스트합니다.
-        real_indicators = list(_ONTOLOGY_REGISTRY.keys())
-        
-        if real_indicators:
-            test_indicator = real_indicators[0]  # 실제 존재하는 첫 번째 지표명
-            test_value = 55.5
-            
-            print(f"\n[테스트] 실제 지표 '{test_indicator}'에 대해 수치 {test_value}%로 규칙 엔진 판정 진행...")
-            result = evaluate_esg_compliance(test_indicator, test_value)
-            
-            print(json.dumps(result, indent=4, ensure_ascii=False))
-            
-            # 가상으로 아까 실패했던 '온실가스' 단어가 포함된 진짜 지표가 있는지 검색해 주는 서비스
-            print("\n[팁] '온실가스' 단어가 포함된 실제 지표 리스트 검색 결과:")
-            matched_hints = [k for k in real_indicators if "온실가스" in k or "탄소" in k]
-            print(matched_hints if matched_hints else "('온실가스'나 '탄소'라는 단어가 포함된 지표가 DB에 없습니다.)")
-            
-    else:
-        print("\n[실패] DB 연결 오류 또는 마스터 데이터가 비어 있습니다.")
