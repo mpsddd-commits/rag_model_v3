@@ -1,45 +1,96 @@
 """
-Main Runner: Executes concurrent ingestion, ontology caching, Hugging Face upload, and hybrid search.
+Main ESG RAG Pipeline Runner.
+Coordinates PDF/Excel ingestion, pgvector storage, BM25 indexing,
+hybrid retrieval, and dataset export.
 """
 import os
-import json
-from settings import safe_print
-from engine import run_concurrent_ingestion_pipeline, process_esg_compliance_query
+import glob
 
+from settings import settings, safe_print
+from rag import (
+    extract_and_chunk_pdf,
+    extract_and_chunk_excel,
+    init_and_save_to_pgvector,
+    initialize_bm25,
+    ask_esg_chatbot,
+    export_pgvector_to_file_and_hf,
+    # Re-export for verify.py compatibility
+    search_similar_documents,
+    bm25_index,
+    global_chunks_pool,
+    ollama_client,
+)
+
+# ────────────────────────────────────────────────────────
+# Re-exported constants (backward compat)
+# ────────────────────────────────────────────────────────
+EMBED_MODEL = settings.embed_model
+RERANK_MODEL = settings.rerank_model
+DB_CONN_STR = settings.postgres_conn_str
+
+# ────────────────────────────────────────────────────────
+# Sync mutable module-level state to/from rag.py
+# ────────────────────────────────────────────────────────
+import rag as _rag
+
+def __getattr__(name):
+    if name in ("bm25_index", "global_chunks_pool"):
+        return getattr(_rag, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+def __setattr__(name, value):
+    if name in ("bm25_index", "global_chunks_pool"):
+        setattr(_rag, name, value)
+    else:
+        globals()[name] = value
+
+
+# ────────────────────────────────────────────────────────
+# Pipeline
+# ────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # 로컬 테스트 디렉토리 보장
-    os.makedirs("./esg_pdf_files", exist_ok=True)
-    os.makedirs("./esg_excel_files", exist_ok=True)
-    
-    print("=" * 70)
-    print("💡 [Step 1] PDF/Excel 동시 적재 + 온톨로지 사전 빌드 + 허깅페이스 원격 백업")
-    print("=" * 70)
-    
-    # 동시 다발 파이프라인 기동 (HuggingFace 저장소 ID를 전달하면 실시간 자동 업로드 실행)
-    run_concurrent_ingestion_pipeline(
-        pdf_dir="./esg_pdf_files", 
-        excel_dir="./esg_excel_files",
-        hf_repo="Makesols/esg-vector-dataset"
-    )
-    
-    print("\n" + "=" * 70)
-    print("💡 [Step 2] 복원된 온톨로지 규칙 룰 & 하이브리드 검색 기반 연산 추론 검증")
-    print("=" * 70)
-    
-    # 공급망 오염 검증 실사 시나리오 구동 (3차 협력사 Comilog 아동노동 1건 검출)
-    sample_query = "저희 보크사이트 채굴 현장에서 아동노동 1건이 현장 감사에서 확인되었습니다."
-    sample_partner = "Comilog"
-    
-    try:
-        response_payload = process_esg_compliance_query(
-            user_query=sample_query,
-            partner_name=sample_partner
-        )
-        
-        print("\n[백엔드 API 엔드포인트 수신 최종 JSON Payload]")
-        print("-" * 70)
-        print(json.dumps(response_payload, indent=4, ensure_ascii=False))
-        print("-" * 70)
-        
-    except Exception as e:
-        safe_print(f"[테스트 실패] 메인 스트림 엔진 구동 중 예외 발생: {e}")
+    all_chunks = []
+
+    # 1. PDF ingestion
+    pdf_dir = "./esg_pdf_files"
+    os.makedirs(pdf_dir, exist_ok=True)
+    for pdf_path in glob.glob(os.path.join(pdf_dir, "*.pdf")):
+        try:
+            all_chunks.extend(extract_and_chunk_pdf(pdf_path))
+        except Exception as e:
+            safe_print(f"[오류] {pdf_path} 읽기 실패: {e}")
+
+    # 2. Excel ingestion
+    excel_dir = "./esg_excel_files"
+    os.makedirs(excel_dir, exist_ok=True)
+    for pattern in ("*.xlsx", "*.xls"):
+        for excel_path in glob.glob(os.path.join(excel_dir, pattern)):
+            try:
+                all_chunks.extend(extract_and_chunk_excel(excel_path))
+            except Exception as e:
+                safe_print(f"[오류] {excel_path} 읽기 실패: {e}")
+
+    # 3. Build pgvector + BM25
+    if all_chunks:
+        try:
+            init_and_save_to_pgvector(all_chunks)
+            initialize_bm25(all_chunks)
+        except Exception as e:
+            safe_print(f"[오류] 지식 베이스 구축 실패: {e}")
+
+    # 4. Demo chatbot query
+    if all_chunks:
+        test_query = "협력사의 탄소 배출량 실사 의무 규정과 제재 조치는 어떻게 되나요?"
+        target_model = settings.mariadb_ollama_model
+        try:
+            answer, citations = ask_esg_chatbot(target_model, test_query)
+            safe_print(f"\n========= [답변] {target_model} =========")
+            safe_print(answer)
+            safe_print("\n========= 참고 출처 =========")
+            for idx, c in enumerate(citations):
+                safe_print(f"[{idx+1}] {c}")
+        except Exception as e:
+            safe_print(f"\n[오류] 답변 생성 실패: {e}")
+
+        # 5. Dataset backup & HF upload
+        export_pgvector_to_file_and_hf(repo_id="Makesols/esg-vector-dataset3")

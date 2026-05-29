@@ -1,17 +1,17 @@
-CREATE TABLE AI_LOGS (
-    log_id INT AUTO_INCREMENT PRIMARY KEY,          -- 로그 고유 고유 ID (자동 증가)
-    partner_name VARCHAR(100) NOT NULL,             -- 협력사명
-    user_query TEXT NOT NULL,                       -- 사용자 질의 내용
-    ai_evaluation LONGTEXT NOT NULL,                -- AI가 최종 생성한 감사 리포트 (Markdown)
-    judgement_status VARCHAR(50) NOT NULL,          -- 온톨로지 가드레일 최종 판정 상태 (합격/불합격 등)
-    risk_chain_json LONGTEXT,                       -- 공급망 리스크 전파 트리 데이터 (JSON 스트링)
-    ai_model VARCHAR(100) NOT NULL,                 -- 추론에 사용된 Ollama LLM 모델명 (추가 🌟)
-    inference_duration DECIMAL(5, 2) NOT NULL,      -- AI 추론 순수 소요 시간 (초 단위, 예: 3.45초) (추가 🌟)
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,  -- 로그 생성 및 판단 시간
-    -- 조회 성능 최적화를 위한 인덱스 추가
-    INDEX idx_partner_status (partner_name, judgement_status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
+CREATE TABLE `AI_LOGS` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '로그 고유 ID (PK)',
+  `user_query` text NOT NULL COMMENT '사용자가 입력한 자연어 질문 내용',
+  `indicator_no` int(11) NOT NULL COMMENT '매칭된 체크리스트 지표 번호',
+  `detected_value` decimal(10,4) DEFAULT 0.0000 COMMENT '사용자 질문에서 추출된 현재 측정 수치',
+  `threshold_value` decimal(10,4) DEFAULT NULL COMMENT 'LLM이 지표 질문에서 추출한 합격 기준 수치',
+  `judgement_status` varchar(20) NOT NULL COMMENT '최종 AI 판정 결과 (합격 / 불합격 / ERROR)',
+  `judgement_time` decimal(7,3) NOT NULL DEFAULT 0.000 COMMENT 'AI 판단 처리 소요 시간 (초 단위, 밀리초 포함)',
+  `execution_time` decimal(7,3) NOT NULL DEFAULT 0.000 COMMENT 'AI 로직 처리 소요 시간 (초 단위, 밀리초 포함)',
+  `created_at` datetime NOT NULL DEFAULT current_timestamp() COMMENT '로그 생성 일시',
+  PRIMARY KEY (`id`),
+  KEY `idx_indicator_no` (`indicator_no`),
+  KEY `idx_created_at` (`created_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=5 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 수치 판정 및 매칭 이력 로그';
 
 CREATE TABLE `SELF_ASSESS_CHECKLIST` (
   `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '체크리스트 ID (PK)',

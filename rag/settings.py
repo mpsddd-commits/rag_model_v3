@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     postgres_user: str = Field(default="root")
     postgres_password: str = Field(default="1234")
     postgres_host: str = Field(default="localhost")
-    postgres_database: str = Field(default="rag_db")
+    postgres_database: str = Field(default="rag3_db")
     postgres_port: int = Field(default=5432)
 
     # Models & Ollama
