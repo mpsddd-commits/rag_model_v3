@@ -294,7 +294,7 @@ def extract_and_compare(user_query: str, target_text: str, model_name: str | Non
         # 최악의 상황 시 하드코딩 에러를 뱉는 대신, 1번 지표(Mn함량)에 대한 기본 수치로 자동 판정하여 우회
         return "불합격", "1.0~1.5"
 
-def process_esg_query(user_query: str, model_name: str | None = None) -> str:
+def process_esg_query(user_query: str, partner_name: str = "Comilog", model_name: str | None = None) -> str:
     """
     Full pipeline: BM25 row lookup → AI numeric comparison → LLM guideline generation → DB log.
     """
@@ -321,6 +321,24 @@ def process_esg_query(user_query: str, model_name: str | None = None) -> str:
         return "수치 비교를 위해 구체적인 현재 수치(예: 0.25%)를 포함하여 질문해 주세요."
     if status == "ERROR" or base_val is None:
         return "시스템 오류로 수치를 판정하지 못했습니다. 관리자에게 문의하세요."
+
+    # ────────────────────────────────────────────────────────
+    # 🛡️ [하드 가드레일 Guardrail 코드 삽입]
+    # ────────────────────────────────────────────────────────
+    # 유저 쿼리에서 숫자 추출 (이미 아래 로그 저장 로직에 있는 코드 활용)
+    user_numbers = re.findall(r"\d+\.\d+|\d+", user_query)
+    if not user_numbers:
+        user_numbers = re.findall(r"\d+\.\d+|\d+", re.sub(r"\b(3003|6061)\b", "", user_query))
+    user_val = float(user_numbers[0]) if user_numbers else 0.0
+
+    # 위험 키워드 정의
+    is_critical_keyword = "아동" in user_query or "강제노동" in user_query or "인권" in matched_row['indicator_name']
+
+    # 지표 번호가 15, 30번이거나, 텍스트 상 인권/아동 리스크 키워드가 매칭되었는데 건수가 0보다 크면 무조건 불합격
+    if (matched_row['indicator_no'] in [15, 30] or is_critical_keyword) and user_val > 0:
+        safe_print(f"[⚠️ 가드레일 강력 발동] Critical 인권 위반 키워드 또는 지표 감지 (검출 건수: {user_val}건). 무조건 '불합격' 처리합니다.")
+        status = "불합격"
+    # ────────────────────────────────────────────────────────
 
     judgement_duration = round(time.time() - judgement_start, 3)
     safe_print(f"[시스템] 판정 완료 → {status} (기준치: {base_val}) [수치 판정 소요: {judgement_duration}초]")
@@ -357,10 +375,6 @@ def process_esg_query(user_query: str, model_name: str | None = None) -> str:
     total_duration = round(time.time() - start_time, 3)
 
     try:
-        user_numbers = re.findall(r"\d+\.\d+|\d+", user_query)
-        if not user_numbers:
-            user_numbers = re.findall(r"\d+\.\d+|\d+", re.sub(r"\b(3003|6061)\b", "", user_query))
-        user_val = float(user_numbers[0]) if user_numbers else 0.0
         # base_val이 '1.0~1.5' 문자열일 경우, DB 저장을 위해 하한선 숫자(1.0)만 추출하여 저장
         db_base_val = base_val
         if isinstance(base_val, str):
@@ -379,26 +393,96 @@ def process_esg_query(user_query: str, model_name: str | None = None) -> str:
         # 발생할 수 있는 모든 예외(db.save 내부 오류 등)를 포괄적으로 처리
         safe_print(f"[경고] 로그 저장 로직 실행 중 오류 발생: {str(e)}")
 
-    return final_answer
+    # 🌟 [연동 핵심 추가]: 로그 저장 직후 지식그래프 대체 리스크 추론 엔진 결합
+    try:
+        risk_report = get_supply_chain_risk_report(
+            failed_short_name=partner_name,
+            indicator_no=matched_row["indicator_no"],
+            judgement_status=status
+        )
+    except Exception as e:
+        safe_print(f"[경고] 공급망 리스크 추론 중 오류 발생: {str(e)}")
+        risk_report = {"risk_propagated": False, "propagation_path": []}
 
+    # 🌟 프론트엔드(JSX)가 한 번에 받아서 쓸 수 있도록 구조적 딕셔너리로 반환 체계 변경
+    return {
+        "evaluation_result": final_answer,   # 기존의 AI 가이드라인 텍스트
+        "status": status,                     # 합격 / 불합격
+        "indicator_no": matched_row["indicator_no"],
+        "detected_value": user_val,
+        "risk_chain_analysis": risk_report   # 상위 공급망 오염 전파 탐색 결과
+    }
+
+def get_supply_chain_risk_report(failed_short_name: str, indicator_no: int, judgement_status: str):
+    """
+    특정 협력사가 불합격 시, RM_TIER_TREE를 기반으로 원청사까지의 오염 경로를 계산합니다.
+    """
+    if judgement_status != "불합격":
+        return {"risk_propagated": False, "propagation_path": []}
+
+    # 1. MariaDB에서 위험이 터진 협력사의 raw_id와 tier를 가져옵니다.
+    query_find_node = "SELECT raw_id, tier FROM RM_TIER_TREE WHERE short_name = %s LIMIT 1"
+    
+    node_info = db.find_one(query_find_node, (failed_short_name,)) 
+    
+    if not node_info:
+        return {"risk_propagated": False, "propagation_path": []}
+        
+    # db.find_one()은 딕셔너리 형태 {'raw_id': '...', 'tier': ...}로 안전하게 반환됩니다.
+    raw_id = node_info['raw_id']
+    failed_tier = node_info['tier']
+
+    # 2. 동일한 raw_id 체인 내에서 상위 차수(숫자가 작은 tier) 기업들을 추적합니다.
+    query_trace = """
+        SELECT tier, short_name, item_name 
+        FROM RM_TIER_TREE 
+        WHERE raw_id = %s AND tier < %s 
+        ORDER BY tier DESC
+    """
+    
+    affected_chain = db.find_all(query_trace, (raw_id, failed_tier))
+
+    # 3. 프론트엔드(JSX) 시각화용 타임라인 배열 가공
+    propagation_path = [{"tier": failed_tier, "short_name": failed_short_name, "status": "위험 발생원 🔴"}]
+    
+    # affected_chain은 딕셔너리를 포함한 리스트([{'tier': ..., 'short_name': ..., 'item_name': ...}, ...])입니다.
+    if affected_chain:
+        for row in affected_chain:
+            propagation_path.append({
+                "tier": row["tier"],
+                "short_name": row["short_name"],
+                "status": f"간접 리스크 전파 ⚠️ ({row['item_name']} 공급망 오염)"
+            })
+        
+    return {
+        "risk_propagated": True,
+        "raw_id": raw_id,
+        "danger_level": "고위험 (High Risk)",
+        "propagation_path": propagation_path,
+        "action_plan": "즉시 상위 공급망 납품 검역 강화 및 대체 소싱(Alternative Sourcing) 프로세스 가동"
+    }
 
 if __name__ == "__main__":
-    upload_success = upload_excel_to_db()
+    # upload_success = upload_excel_to_db()
 
-    if upload_success:
+    # if upload_success:
         print("\n" + "="*50)
         print("💡 Matcher(매칭 시스템) 테스트를 시작합니다.")
         print("="*50)
         
-        # 2. 테스트할 협력사 담당자의 가상 질문을 정의합니다.
-        test_query = "저희 3003 합금 균질화 처리 시 온도 610도 12시간 유지 했습니다. 기준에 맞나요?"
+        # 테스트 데이터 정의 (일부러 '불합격'이 나오도록 수치 이탈 설정)
+        test_query = "저희 보크사이트 채굴 현장에서 아동노동 1건이 현장 감사에서 확인되었습니다."
+        test_partner = "Comilog" # 3차 채굴 협력사 가정
         
-        # 3. process_esg_query 함수를 호출하여 AI 진단을 수행합니다.
-        #    (내부적으로 1.BM25 행 매칭 -> 2.AI 수치 분석 및 판정 -> 3.가이드라인 생성 -> 4.로그 저장이 모두 실행됨)
-        ai_guideline = process_esg_query(test_query)
+        # 파이썬 엔기반 파이프라인 호출
+        response_dict = process_esg_query(test_query, partner_name=test_partner)
         
-        # 4. 화면에 AI가 생성한 최종 공정 조치 지침 가이드라인을 출력합니다.
-        print("\n[AI가 생성한 협력사 안내 가이드라인]")
+        print("\n[1. AI가 생성한 협력사 안내 가이드라인]")
         print("-" * 50)
-        print(ai_guideline)
+        print(response_dict.get("evaluation_result"))
+        print("-" * 50)
+        
+        print("\n[2. 공급망 지식그래프 대체 리스크 전파 보고서]")
+        print("-" * 50)
+        print(json.dumps(response_dict.get("risk_chain_analysis"), indent=4, ensure_ascii=False))
         print("-" * 50)
