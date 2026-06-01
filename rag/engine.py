@@ -106,20 +106,34 @@ def export_ontology_to_jsonl(output_filename: str = "esg_ontology_template.jsonl
 # ════════════════════════════════════════════════════════
 # 
 def extract_and_chunk_pdf(pdf_path: str, chunk_size: int = 500, chunk_overlap: int = 150) -> list:
-    """150자 오버랩 연결 결합 세팅이 추가된 슬라이딩 윈도우 청킹 함수"""
+    """150자 오버랩 연결 결합 세팅이 추가된 슬라이딩 윈도우 청킹 함수 (버그 수정 버전)"""
     chunks = []
     file_name = os.path.basename(pdf_path)
     try:
         reader = PdfReader(pdf_path)
         full_text = "".join([page.extract_text() or "" for page in reader.pages])
+        
+        # 텍스트가 정상적으로 추출되었는지 가드레일 확인
+        if not full_text.strip():
+            safe_print(f"[경고] PDF 파일에서 텍스트를 추출할 수 없습니다. (스캔된 이미지 또는 보안 설정 확인 필요): {file_name}")
+            return chunks
+
+        # 연속된 공백 및 줄바꿈을 단일 공백으로 정제
         full_text = re.sub(r'\s+', ' ', full_text).strip()
         
-        # 500자 크기로 슬라이싱하되, 다음 시작점은 350자(500 - 150) 뒤로 설정하여 150자가 중복 결합됨
+        # 500자 크기로 슬라이싱하되, 오버랩을 차감한 크기만큼 전진 (500 - 150 = 350자씩 이동)
         step = chunk_size - chunk_overlap
-        if step <= 0: step = chunk_size  # 예외 방지 가드레일
+        if step <= 0: 
+            step = chunk_size  # 예외 방지 가드레일
 
+        # 루프 내부의 조기 break 제거 후 순수하게 range 제어권에 맡김
         for i in range(0, len(full_text), step):
-            text_slice = full_text[i:i+chunk_size]            
+            text_slice = full_text[i:i+chunk_size]
+            
+            # 마지막 남은 자투리 텍스트가 너무 짧은 경우(예: 10자 미만) 무의미하므로 스킵 방지용 가드
+            if not text_slice.strip():
+                continue
+                
             # 고유 식별을 위한 해시값 생성
             chunk_id = hashlib.md5(f"{file_name}_{i}_{text_slice[:20]}".encode()).hexdigest()
             chunks.append({
@@ -130,9 +144,7 @@ def extract_and_chunk_pdf(pdf_path: str, chunk_size: int = 500, chunk_overlap: i
                 "timestamp": datetime.datetime.now().isoformat()
             })
             
-            # 텍스트의 끝에 도달하면 루프 종료
-            if i + chunk_size >= len(full_text):
-                break
+        safe_print(f"[청킹 완료] 파일명: {file_name} -> 생성된 총 청크 수: {len(chunks)}개")
                 
     except Exception as e:
         safe_print(f"[오류] PDF 파싱 실패 ({file_name}): {e}")
@@ -143,7 +155,6 @@ def init_and_save_to_pgvector(chunks: list):
     if not conn: return
     try:
         with conn, conn.cursor() as cur:
-            # CREATE EXTENSION: PostgreSQL에서 기본적으로 제공하지 않는 특수한 기능(데이터 타입, 인덱스, 함수 등)을 추가할 때 사용하는 명령어
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS ESG_PDF_VECTORS (
@@ -157,20 +168,45 @@ def init_and_save_to_pgvector(chunks: list):
             """)
             
             data_to_insert = []
-            for chunk in chunks:
-                resp = ollama_client.embeddings(model=settings.embed_model, prompt=chunk["content"])
-                data_to_insert.append((chunk["chunk_id"], chunk["file_name"], chunk["content"], resp["embedding"], chunk["timestamp"]))
-            
-            execute_values(cur, """
-                INSERT INTO ESG_PDF_VECTORS (chunk_id, file_name, content, embedding, timestamp)
-                VALUES %s ON CONFLICT (chunk_id) DO NOTHING;
-            """, data_to_insert)
-            conn.commit()
-            safe_print(f"[PostgreSQL] {len(chunks)}개 PDF 벡터 스토어 동기화 완료.")
-    except Exception as e:
-        safe_print(f"[PostgreSQL 오류] pgvector 저장 실패: {e}")
+            total_chunks = len(chunks)
+            safe_print(f"\n[Ollama] 총 {total_chunks}개 청크의 대량 임베딩 연산을 시작합니다. (시간이 다소 소요될 수 있습니다)")
 
-def load_excel_to_mariadb(excel_dir: str):
+            start_time = time.time()
+            for idx, chunk in enumerate(chunks, 1):
+                try:
+                    # 💡 20개 처리할 때마다 로그를 출력하여 멈추지 않고 작동 중임을 알림
+                    if idx % 20 == 0 or idx == total_chunks:
+                        elapsed = time.time() - start_time
+                        safe_print(f" -> 임베딩 생성 중... [{idx}/{total_chunks}] ({idx/total_chunks*100:.1f}%) | 소요시간: {elapsed:.1f}초")
+                        
+                    # Ollama 임베딩 API 호출
+                    resp = ollama_client.embeddings(model=settings.embed_model, prompt=chunk["content"])
+                    data_to_insert.append((
+                        chunk["chunk_id"], 
+                        chunk["file_name"], 
+                        chunk["content"], 
+                        resp["embedding"], 
+                        chunk["timestamp"]
+                    ))
+                except Exception as ce:
+                    safe_print(f"\n[경고] {idx}번째 청크 임베딩 생성 중 오류 발생 (스킵 후 계속 진행): {ce}")
+                    continue
+            
+            # 💡 연산이 끝난 데이터가 있으면 한 번에 대량 벌크 인서트(속도 향상)
+            if data_to_insert:
+                safe_print(f"[PostgreSQL] {len(data_to_insert)}개의 데이터를 pgvector에 적재 중...")
+                execute_values(cur, """
+                    INSERT INTO ESG_PDF_VECTORS (chunk_id, file_name, content, embedding, timestamp)
+                    VALUES %s ON CONFLICT (chunk_id) DO NOTHING;
+                """, data_to_insert)
+                conn.commit()
+                safe_print(f"[PostgreSQL] pgvector 스토어 동기화 완료! (총 {len(data_to_insert)}개 적재)\n")
+                
+    except Exception as e:
+        safe_print(f"[PostgreSQL 오류] pgvector 파이프라인 처리 실패: {e}")
+
+
+def load_self_assess_checklist_to_mariadb(excel_dir: str):
     """
     엑셀의 각 시트(탭) 이름을 기반으로 partner_type을 동적으로 추출하여
     SELF_ASSESS_CHECKLIST 테이블에 마스터 데이터를 정합성 있게 적재합니다.
@@ -217,9 +253,7 @@ def load_excel_to_mariadb(excel_dir: str):
                         # 최소한 지표번호와 카테고리, 지표명이 존재할 수 있는 배열 길이인지 검증
                         if len(row_vals) >= 3:
                             indicator_no_raw = row_vals[0]
-                            
-                            # [안전 가드레일]: 지표번호 위치에 'No.', '항목' 등 문자열 헤더 유입 시 적재 건너뛰기
-                            if not indicator_no_raw.isdigit():
+                            if not indicator_no_raw.replace('.0', '').isdigit(): # 실수형 문자열 차단 방어
                                 continue
                             
                             # DDL 구조 및 제공된 데이터프레임 구조에 따른 1:1 변수 매핑
@@ -235,7 +269,6 @@ def load_excel_to_mariadb(excel_dir: str):
                             evidence_yn    = row_vals[9] if len(row_vals) > 9 else "N"
                             evidence_list  = row_vals[10] if len(row_vals) > 10 else ""
                             action_plan    = row_vals[11] if len(row_vals) > 11 else "즉시 시정조치 가이드라인 가동"
-                            
                             delete_yn      = 0  # 삭제 여부 기본값 FALSE(0)
                             
                             # 2. DDL insert 문 매핑 구조 파라미터 리스트업
@@ -270,6 +303,77 @@ def load_excel_to_mariadb(excel_dir: str):
         """
         db.save_many(sql, checklist_rows)
         safe_print(f"\n[MariaDB 성공] 시트별 등급 분기 적용 완료 -> 총 {len(checklist_rows)}개 핵심 지표 마스터 적재 완료.")
+
+def load_risk_criteria_to_mariadb(excel_dir: str):
+    """
+    '자가진단_리스크_분류_기준.xlsx' 파일을 읽어 
+    제공된 실제 DDL 구조를 가진 ESG_RISK_CRITERIA 테이블에 전수 적재합니다.
+    """
+    # 1. 기존 리스크 기준 마스터 초기화 및 외래키 체크 제어
+    db.save("SET FOREIGN_KEY_CHECKS = 0;")
+    db.save("TRUNCATE TABLE ESG_RISK_CRITERIA;")
+    db.save("SET FOREIGN_KEY_CHECKS = 1;")
+    
+    risk_criteria_rows = []
+    seen_items = set()
+    
+    # 디렉토리 내에서 리스크 분류 기준 관련 엑셀 파일 탐색
+    # (특정 파일명인 '자가진단_리스크_분류_기준'이 포함된 파일을 타겟팅)
+    for pattern in ("*리스크*분류*.xlsx", "*리스크*분류*.xls", "자가진단_리스크_분류_기준.xlsx"):
+        for excel_path in glob.glob(os.path.join(excel_dir, pattern)):
+            try:
+                # 첫 번째 행은 타이틀 텍스트("리스크 분류 기준 추천 — 고위험 / 중위험 / 저위험")이므로
+                # header=1로 설정하여 '항목, 고위험, 중위험, 저위험' 컬럼 라인을 헤더로 지정합니다.
+                xl_dict = pd.read_excel(excel_path, sheet_name=None, header=1)
+                
+                for sheet_name, df in xl_dict.items():
+                    safe_print(f"[리스크 분류 파싱] 파일: {os.path.basename(excel_path)} / 시트명: '{sheet_name}'")
+                    
+                    for idx, row in df.iterrows():
+                        # 결측치(NaN) 데이터를 빈 문자열('')로 안전 치환 후 앞뒤 공백 제거
+                        row_vals = [str(v).strip() if pd.notna(v) else "" for v in row.values]
+                        
+                        # 최소한 '항목' 컬럼이 비어있지 않고 구조를 갖추었는지 확인
+                        if len(row_vals) >= 4:
+                            item_name   = row_vals[0] # 항목 (예: 우선순위 기준, 규제 영향 등)
+                            high_risk   = row_vals[1] # 고위험 (High Risk) 🔴
+                            medium_risk = row_vals[2] # 중위험 (Medium Risk) 🟡
+                            low_risk    = row_vals[3] # 저위험 (Low Risk) 🟢
+                            
+                            # 빈 행이거나 헤더가 유입된 경우 방어 가드레일
+                            if not item_name or item_name == "항목" or "기준 추천" in item_name:
+                                continue
+                                
+                            # UNIQUE KEY `ux_item_name` (`item_name`) 충돌 및 메모리 중복 적재 방지
+                            if item_name not in seen_items:
+                                # DDL 컬럼 맵핑 타겟 리스트업: item_name, high_risk, medium_risk, low_risk
+                                risk_criteria_rows.append((
+                                    item_name,
+                                    high_risk,
+                                    medium_risk,
+                                    low_risk
+                                ))
+                                seen_items.add(item_name)
+                                
+            except Exception as e:
+                safe_print(f"[오류] '{os.path.basename(excel_path)}' 리스크 기준 파싱 중 크리티컬 예외 발생: {e}")
+
+    # 2. 마리아DB 최종 벌크 인서트 트랜잭션 수행
+    if risk_criteria_rows:
+        # criterion_id(자동증가), created_at, updated_at(자동 타임스탬프)는 DBMS에서 처리하도록 컬럼 배제
+        sql_risk = """
+            INSERT INTO ESG_RISK_CRITERIA (
+                item_name, high_risk, medium_risk, low_risk
+            ) VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                high_risk = VALUES(high_risk), 
+                medium_risk = VALUES(medium_risk), 
+                low_risk = VALUES(low_risk);
+        """
+        db.save_many(sql_risk, risk_criteria_rows)
+        safe_print(f"[MariaDB 성공] ESG_RISK_CRITERIA 테이블에 총 {len(risk_criteria_rows)}건의 리스크 평가 마스터 기준 적재 완료.")
+    else:
+        safe_print("[경고] 적재 대상 리스크 분류 기준 데이터가 존재하지 않습니다. 파일 경로 및 파일 양식(Header)을 확인하세요.")
 
 def export_pgvector_to_hf(repo_id: str ):
     """ [복원] PostgreSQL pgvector에 저장된 모든 원천 지식 임베딩 데이터를 끌어올려 Hugging Face 허브로 원격 백업합니다."""
@@ -312,7 +416,8 @@ def run_concurrent_ingestion_pipeline(pdf_dir: str, excel_dir: str, hf_repo: str
         bm25_index = BM25Okapi(tokenized_corpus)
         
     # 2. 엑셀 마스터 적재 및 온톨로지 캐시 레이어 빌드 (동시 수행)
-    load_excel_to_mariadb(excel_dir)
+    load_self_assess_checklist_to_mariadb(excel_dir)
+    load_risk_criteria_to_mariadb(excel_dir)
     build_ontology_registry()
     export_ontology_to_jsonl("esg_ontology_template.jsonl")
     
