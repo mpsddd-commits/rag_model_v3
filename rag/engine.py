@@ -31,12 +31,12 @@ _ONTOLOGY_TEMPLATE_LIST: list = []
 # ════════════════════════════════════════════════════════
 def parse_complex_criteria(question_text: str) -> dict:
     """
-    질문(question) 텍스트를 분석하여 수치 검증(단일/범위) 또는 Boolean 검증 유형을 판별하고
-    검증에 필요한 마스터 기준값과 연산자를 딕셔너리 형태로 반환합니다.
+    [개선된 버전] 불필요한 제품명/규격번호 숫자를 필터링하고 
+    물결표(~) 구조를 인식하여 정교한 RANGE 및 NUMERIC 마스터 기준값을 추출합니다.
     """
     result = {
-        "criteria_type": "BOOL",  # 기본값: BOOL (~했습니까?, 있습니까? 등)
-        "operator": "== Y",       # 합격 기준 오퍼레이터
+        "criteria_type": "BOOL",
+        "operator": "== Y",
         "threshold_value": None,
         "min_value": None,
         "max_value": None
@@ -45,22 +45,36 @@ def parse_complex_criteria(question_text: str) -> dict:
     if not question_text:
         return result
 
-    # 1. 범위형 분석 ('범위 내에 있습니까')
-    if "범위 내" in question_text or "범위 내에" in question_text:
-        # 모든 소수점 및 정수 추출 (예: 1.00~1.50 -> ['1.00', '1.50'])
-        nums = re.findall(r"\d+\.\d+|\d+", question_text)
-        if len(nums) >= 2:
+    # 1. 전처리 가드레일: 의도치 않은 메타 숫자(4자리 제품명, ASTM 규격 번호 등)를 임시 제거
+    # 예: Al 3003 -> Al , ASTM B209 -> ASTM B 로 변경하여 수치 인식 방지
+    clean_text = re.sub(r"\b\d{4}\b", "", question_text)  # 4자리 숫자(3003 등) 제거
+    clean_text = re.sub(r"B\d+", "B", clean_text)         # B209 등 규격명 뒤의 숫자 제거
+
+    # 2. 범위형 분석 (문장에 '범위 내'가 있거나 숫자~숫자 구조가 명시적인 경우)
+    # 정규식으로 [숫자][공백이나 물결][숫자] 형태를 직접 타겟팅 (예: 1.00~1.50)
+    range_match = re.search(r"(\d+\.\d+|\d+)\s*[~-]\s*(\d+\.\d+|\d+)", clean_text)
+    
+    if "범위 내" in question_text or range_match:
+        if range_match:
             result["criteria_type"] = "RANGE"
-            result["min_value"] = float(nums[0])
-            result["max_value"] = float(nums[1])
+            result["min_value"] = float(range_match.group(1))
+            result["max_value"] = float(range_match.group(2))
             result["operator"] = "BETWEEN"
             return result
+        else:
+            # 물결표는 없지만 '범위 내' 키워드가 있는 경우 폴백 처리
+            nums = re.findall(r"\d+\.\d+|\d+", clean_text)
+            if len(nums) >= 2:
+                result["criteria_type"] = "RANGE"
+                result["min_value"] = float(nums[0])
+                result["max_value"] = float(nums[1])
+                result["operator"] = "BETWEEN"
+                return result
 
-    # 2. 단일 수치 비교형 분석 ('이하입니까', '미만입니까', '초과입니까', '이상입니까')
-    nums = re.findall(r"\d+\.\d+|\d+", question_text)
+    # 3. 단일 수치 비교형 분석 ('이하', '미만', '초과', '이상')
+    nums = re.findall(r"\d+\.\d+|\d+", clean_text)
     
-    # 'Zero'나 '0건' 같은 특수 키워드 가드레일 처리
-    if "Zero" in question_text or "zero" in question_text:
+    if "Zero" in question_text or "zero" in question_text or "0건" in question_text:
         result["criteria_type"] = "NUMERIC"
         result["operator"] = "<="
         result["threshold_value"] = 0.0
@@ -72,26 +86,21 @@ def parse_complex_criteria(question_text: str) -> dict:
             result["criteria_type"] = "NUMERIC"
             result["operator"] = "<="
             result["threshold_value"] = val
-            return result
         elif "미만" in question_text:
             result["criteria_type"] = "NUMERIC"
             result["operator"] = "<"
             result["threshold_value"] = val
-            return result
         elif "초과" in question_text:
             result["criteria_type"] = "NUMERIC"
             result["operator"] = ">"
             result["threshold_value"] = val
-            return result
         elif "이상" in question_text or "충족" in question_text:
             result["criteria_type"] = "NUMERIC"
             result["operator"] = ">="
             result["threshold_value"] = val
-            return result
 
-    # 3. 수치 조건이 없는 경우 여부 확인형 (BOOL 분기 고수)
+    # 4. 상태 확인형 불리언 가드
     if "않습니까" in question_text:
-        # (~하지 않습니까? -> 예, 하지 않습니다 가 합격이므로 로직상 N 또는 특수 체크 필요)
         result["operator"] = "== N"
         
     return result
@@ -107,15 +116,17 @@ def build_ontology_registry():
     
     for row in rows:
         ind_name = row["indicator_name"]
-        raw_question = row["question"]
-        
+        raw_question = row["question"]        
         # 고도화된 복합 기준 분석기 호출
         criteria_meta = parse_complex_criteria(raw_question)
+        
+        # DB에 action_plan이 없는 경우 안전 가드
+        db_action = row.get("action_plan") or "지표 기준 미달: 공급망 정밀 실사 및 시정 조치 가동"
         
         # 1. 인메모리 온톨로지 딕셔너리 빌드
         _ONTOLOGY_REGISTRY[ind_name] = {
             "indicator_no": row["indicator_no"],
-            "action_plan": row.get("action_plan", "즉시 시정 조치 가동"),
+            "action_plan": db_action,
             "raw_text": raw_question,
             **criteria_meta  # 분기된 메타 정보 전량 언팩 적재
         }
@@ -125,10 +136,62 @@ def build_ontology_registry():
             "indicator_no": row["indicator_no"],
             "indicator_name": ind_name,
             "raw_expression": raw_question,
+            "action_plan": db_action,
             "meta": criteria_meta
         })
         
-    safe_print(f"[온톨로지 엔지니어링] {len(_ONTOLOGY_REGISTRY)}개의 지표 온톨로지 복합 분기 규칙 캐싱 완료.")
+    safe_print(f"[온톨로지 엔지니어링] DB 원본 기반 {len(_ONTOLOGY_REGISTRY)}개의 지표 온톨로지 복합 분기 규칙 캐싱 완료.")
+
+# ════════════════════════════════════════════════════════
+# 수정 완료된 완성본 JSONL 기반 로드 로직
+# ════════════════════════════════════════════════════════
+def build_ontology_registry_from_jsonl(jsonl_path: str = "./esg_ontology_template.jsonl"):
+    """
+    사용자가 오프라인에서 수정을 완료한 완성본 JSONL 파일을 직접 파싱하여 
+    전역 온톨로지 사전 및 템플릿 메모리 구조를 동기화합니다.
+    """
+    global _ONTOLOGY_REGISTRY, _ONTOLOGY_TEMPLATE_LIST
+    _ONTOLOGY_REGISTRY.clear()
+    _ONTOLOGY_TEMPLATE_LIST.clear()
+    
+    if not os.path.exists(jsonl_path):
+        safe_print(f"[경고] 완성본 온톨로지 파일이 존재하지 않습니다. DB 연동을 임시 가동합니다: {jsonl_path}")
+        build_ontology_registry()
+        return
+
+    count = 0
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                ind_name = data["indicator_name"]
+                raw_question = data["raw_expression"]
+                meta = data["meta"]
+                # DB action_plan을 우선하되, 파일에도 없으면 기본값 주입 (이중 안전장치)
+                file_action_plan = data.get("action_plan") or meta.get("action_plan") or "지표 마스터 기준 미달에 따른 공급망 정밀 실사 가동"
+                
+                # 메모리 글로벌 레지스트리에 수치 매핑 규칙 주입
+                _ONTOLOGY_REGISTRY[ind_name] = {
+                    "indicator_no": data["indicator_no"],
+                    "action_plan": file_action_plan,
+                    "raw_text": raw_question,
+                    "criteria_type": meta.get("criteria_type"),
+                    "operator": meta.get("operator"),
+                    "threshold_value": meta.get("threshold_value"),
+                    "min_value": meta.get("min_value"),
+                    "max_value": meta.get("max_value")
+                }
+                
+                # AI 포맷 리스트 구조화 보존
+                _ONTOLOGY_TEMPLATE_LIST.append(data)
+                count += 1
+            except Exception as e:
+                safe_print(f"[JSONL 로드 에러] 라인 파싱 실패: {e}")
+                
+    safe_print(f"[온톨로지 엔지니어링] 완성본 JSONL 기반 {count}개 지표 복합 룰 규칙 완벽 바인딩 성공.")
 
 # ════════════════════════════════════════════════════════
 # 🔍 Hybrid Retriever Engine (BM25 + pgvector + Rerank)
@@ -159,8 +222,7 @@ def search_hybrid_documents(query: str, top_k: int = 3) -> list:
     except Exception as e:
         safe_print(f"[Dense 검색 오류] : {e}")
 
-    candidates = list(set(candidates))
-    
+    candidates = list(set(candidates))    
     pairs = [[query, doc] for doc in candidates]
     rerank_scores = reranker.predict(pairs)
     scored_docs = sorted(zip(candidates, rerank_scores), key=lambda x: x[1], reverse=True)
@@ -168,7 +230,7 @@ def search_hybrid_documents(query: str, top_k: int = 3) -> list:
     return [doc for doc, score in scored_docs[:top_k]]
 
 # ════════════════════════════════════════════════════════
-# ⚖️ [고도화] 지식 연동 온톨로지 다형성(Type) 룰 검증 엔진
+# ⚖️ 지식 연동 온톨로지 다형성(Type) 룰 검증 엔진
 # ════════════════════════════════════════════════════════
 def evaluate_esg_by_ontology_advanced(matched_indicator_name: str, user_val: float | None, user_bool: str | None) -> tuple[str, str]:
     """
@@ -223,8 +285,7 @@ def evaluate_esg_by_ontology_advanced(matched_indicator_name: str, user_val: flo
 
 def get_supply_chain_risk_report(failed_short_name: str, judgement_status: str) -> dict:
     """
-    [RM_TIER_TREE 연동] 불합격 판정 시, 해당 협력사로부터 
-    상위 Tier 1 공급사까지의 위험 전파 경로를 실시간 추적합니다.
+    [RM_TIER_TREE 연동] 불합격 판정 시, 해당 협력사로부터 상위 Tier 1 공급사까지의 위험 전파 경로를 실시간 추적합니다.
     """
     if judgement_status != "불합격":
         return {"risk_propagated": False, "propagation_path": []}
@@ -241,7 +302,6 @@ def get_supply_chain_risk_report(failed_short_name: str, judgement_status: str) 
         
     raw_id = node_info['raw_id']
     failed_tier = node_info['tier']
-
     affected_chain = db.find_all("""
         SELECT tier, short_name, item_name FROM RM_TIER_TREE 
         WHERE raw_id = %s AND tier < %s ORDER BY tier DESC
@@ -304,103 +364,124 @@ def save_ai_inference_log(partner_name: str, query: str, result_text: str, statu
 # 🔍 이원화 검색 인터페이스 바인딩 (여기에 배치합니다)
 # ════════════════════════════════════════════════════════
 
-# [Track 1] 실제 소스 코드 내부의 db 모듈(db.find_all)을 활용한 MariaDB 검색 함수 정의
-def search_mariadb_keyword(user_query: str, partner_name: str) -> list:
-    """
-    MariaDB 지표 마스터 테이블에서 키워드 기반으로 기준 데이터를 검색합니다.
-    """
-    contexts = []
-    # 정규식으로 한글/영문 키워드 추출 (예: '철', 'Fe')
-    keywords = re.findall(r'[a-zA-Z가-힣]+', user_query)
-    if not keywords:
-        return contexts
+# 이제 마리아 db에서 뽑아오는것은 마리아db에서 뽑은 데이터 기반 온톨로지 사전 jsonl파일을 사용하므로 불필요 + 속도 빠르고 네트워크 비용 적게 듦
+# # [Track 1] 실제 소스 코드 내부의 db 모듈(db.find_all)을 활용한 MariaDB 검색 함수 정의
+# def search_mariadb_keyword(user_query: str, partner_name: str) -> list:
+#     """
+#     MariaDB 지표 마스터 테이블에서 키워드 기반으로 기준 데이터를 검색합니다.
+#     """
+#     contexts = []
+#     # 정규식으로 한글/영문 키워드 추출 (예: '철', 'Fe')
+#     keywords = re.findall(r'[a-zA-Z가-힣]+', user_query)
+#     if not keywords:
+#         return contexts
 
-    main_keyword = keywords[0]
-    sql = """
-        SELECT indicator_name, question, action_plan 
-        FROM SELF_ASSESS_CHECKLIST 
-        WHERE indicator_name LIKE %s OR question LIKE %s
-    """
-    search_pattern = f"%{main_keyword}%"
+#     main_keyword = keywords[0]
+#     sql = """
+#         SELECT indicator_name, question, action_plan 
+#         FROM SELF_ASSESS_CHECKLIST 
+#         WHERE indicator_name LIKE %s OR question LIKE %s
+#     """
+#     search_pattern = f"%{main_keyword}%"
     
-    # 내장된 db 유틸리티로 조회 실행
-    results = db.find_all(sql, (search_pattern, search_pattern))
+#     # 내장된 db 유틸리티로 조회 실행
+#     results = db.find_all(sql, (search_pattern, search_pattern))
     
-    for row in results:
-        contexts.append(
-            f"[MariaDB 기준지표] 지표명: {row['indicator_name']} | "
-            f"점검문항: {row['question']} | "
-            f"대응가이드: {row['action_plan']}"
-        )
-    return contexts
+#     for row in results:
+#         contexts.append(
+#             f"[MariaDB 기준지표] 지표명: {row['indicator_name']} | "
+#             f"점검문항: {row['question']} | "
+#             f"대응가이드: {row['action_plan']}"
+#         )
+#     return contexts
 
 def process_esg_compliance_query_advanced(user_query: str, partner_name: str) -> dict:
     """
-    [수정 완성본] 이원화 검색, 보수적 가드레일, 최종 사후검증 및 
-    공급망 리스크 역추적 로직을 결합한 통합 감사 리포팅 파이프라인
+    [수정 완성본] 무거운 MariaDB 텍스트 조회를 완전히 제거하고,
+    정제된 완성본 JSONL 온톨로지 캐시 데이터 + 비정형 PDF 하이브리드 검색 컨텍스트를 결합하여
+    다형성 규칙 판정 및 보수적 가드레일을 수행하는 통합 감사 리포팅 파이프라인
     """
+    global _ONTOLOGY_REGISTRY
+    start_time = time.time()
     
-    # 1. 사용자 쿼리에서 수치 데이터 추출
+    # 1. 사용자 쿼리에서 수치 데이터 및 불리언 경향 동적 분석
     user_numbers = re.findall(r"\d+\.\d+|\d+", user_query)
-    user_val = float(user_numbers[0]) if user_numbers else 0.0
+    user_val = float(user_numbers[0]) if user_numbers else None    
+    # 간단한 불리언 판별 가드레일 (쿼리에 특정 키워드가 발견되면 기본 Y 상태로 간주)
+    user_bool = "Y" if any(kwd in user_query for kwd in ["확인", "발생", "검출", "1건", "있음", "탈락"]) else "N"
     
-    # 2. MariaDB + VectorDB 이원화 검색 실행
-    mariadb_contexts = search_mariadb_keyword(user_query, partner_name) 
-    vectordb_contexts = search_hybrid_documents(user_query, top_k=2)
+    # 2. [최적화] MariaDB 대신 로컬 온톨로지 사전을 탐색하여 텍스트 컨텍스트 및 매칭 지표 추출
+    local_ontology_contexts = []
+    keywords = re.findall(r'[a-zA-Z가-힣0-9]+', user_query)
+    matched_indicator = None
     
-    combined_contexts = mariadb_contexts + vectordb_contexts
-    context_str = "\n".join(combined_contexts)
+    if keywords:
+        for kwd in keywords:
+            for ind_name, spec in _ONTOLOGY_REGISTRY.items():
+                # 검색어 키워드가 지표명이나 원문 문항 텍스트에 포함되어 있는지 매칭
+                if kwd in ind_name or kwd in spec["raw_text"]:
+                    if not matched_indicator:
+                        matched_indicator = ind_name
+                    local_ontology_contexts.append(
+                        f"[정제 완료 마스터 가이드라인] 지표명: {ind_name} | 기준문항: {spec['raw_text']}"
+                    )
+    
+    # 3. 비정형 PDF 증빙 문서 대상 하이브리드(Vector + BM25) 리트리버 가동
+    vectordb_contexts = search_hybrid_documents(user_query, top_k=2)    
+    # 지식 구조 컨텍스트와 문서 데이터 컨텍스트 병합
+    combined_contexts = local_ontology_contexts + vectordb_contexts
+    context_str = "\n".join(combined_contexts) if combined_contexts else "참조 가능한 마스터 가이드라인 및 증빙 문서가 존재하지 않습니다."
     
     # ════════════════════════════════════════════════════════
-    # ⚖️ [개선] 보수적 가드레일 기반 동적 판정 레이어
+    # ⚖️ 온톨로지 템플릿 Registry 기반 동적 규칙 검증 및 판정 레이어
     # ════════════════════════════════════════════════════════
     judgement_status = "검토 필요"
     action_plan = "정확한 매칭 기준이 없으므로 담당자 수동 검토 및 재실행 요망"
-
-    # ⭐ [최우선 가드레일] 인권/아동/강제노동 관련 키워드가 쿼리에 있고 위반 사항(1건 이상)이 있으면 무조건 불합격!
-    if any(kwd in user_query for kwd in ["아동", "강제노동", "인권위반"]) and user_val > 0:
-        judgement_status = "불합격"
-        action_plan = "① 즉시 공급 중단 ② CSDDD 이행계획서 징구 및 현장 정밀 실사단 파견"
     
-    # 그 외의 경우에만 일반 수치 비교 진행
-    else:
-        keywords = re.findall(r'[a-zA-Z가-힣]+', user_query)
-        master_row = None
-        if keywords:
-            main_keyword = keywords[0]
-            sql_master = "SELECT question, action_plan FROM SELF_ASSESS_CHECKLIST WHERE indicator_name LIKE %s OR question LIKE %s LIMIT 1"
-            master_row = db.find_one(sql_master, (f"%{main_keyword}%", f"%{main_keyword}%"))
+    # 매칭된 지표 규칙이 사전에 존재한다면 다형성(Type) 판정 엔진 작동
+    if matched_indicator:
+        judgement_status, file_specific_action = evaluate_esg_by_ontology_advanced(
+            matched_indicator_name=matched_indicator,
+            user_val=user_val,
+            user_bool=user_bool
+        )
+        # 이제 .jsonl 파일에서 추출된 커스텀 조치 계획이 불합격 시 action_plan에 완벽히 주입됩니다.
+        if judgement_status == "불합격":
+            action_plan = file_specific_action
+        elif judgement_status == "합격":
+            action_plan = "마스터 기준 충족. 특이사항 없음"
 
-        if master_row and master_row.get("question"):
-            db_question = master_row["question"]
-            db_action = master_row.get("action_plan", "즉시 시정 조치 가동")
-            
-            # (중략: 기존의 db_threshold 추출 및 일반 수치 비교 로직)
-            # ...
-            if is_violated:
-                judgement_status = "불합격"
-                action_plan = db_action
-            else:
-                judgement_status = "합격"
-                action_plan = "마스터 기준 충족. 특이사항 없음"
-
+    # ════════════════════════════════════════════════════════
+    # 🚨 [최우선 가드레일] 인권/아동/강제노동 관련 위반 차단 레이어
+    # ════════════════════════════════════════════════════════
+    # 온톨로지 판정 결과보다 우선하여 무조건 불합격 처리하는 최상위 시스템 가드레일
+    if any(kwd in user_query for kwd in ["아동", "강제노동", "인권위반"]):
+        if (user_val is not None and user_val > 0) or user_bool == "Y":
+            judgement_status = "불합격"
+            action_plan = "① 즉시 공급 중단 ② CSDDD 이행계획서 징구 및 현장 정밀 실사단 파견"
+    
     # 🎯 [사후 검증] 철 함량 강제 가드레일 (기존 유지)
-    if any(kwd in user_query for kwd in ["Fe", "철", "Fe(철)"]) and user_val > 0.70:
+    if any(kwd in user_query for kwd in ["Fe", "철", "Fe(철)"]) and user_val is not None and user_val > 0.70:
         judgement_status = "불합격"
         action_plan = "① 즉시 공급 중단 및 공정 전수조사 ② 원자재 공급사 변경 검토 ③ 성분 분석 성적서(수입검사재) 재요구"
 
-    # 3. 공급망 리스크 전파 경로 분석 호출 및 구조화
+    # 4. 공급망 리스크 전파 경로 분석 호출 및 구조화
     risk_chain = get_supply_chain_risk_report(partner_name, judgement_status)
     
     if judgement_status == "불합격":
-        risk_chain["action_plan"] = action_plan
+        # 트리 기반 연쇄 전파 플랜이 특별히 정의되지 않았다면 사용자가 파일에 명시해둔 커스텀 조치 방안을 주입합니다.
+        if not risk_chain.get("propagation_path"):
+            risk_chain["action_plan"] = action_plan
+        else:
+            # 연쇄 리스크가 전파되는 경우 트리 추적 리포트의 행동 양식을 최우선 활용하되, 본문에 병합 가능
+            action_plan = risk_chain.get("action_plan", action_plan)
     else:
         risk_chain["action_plan"] = "정기 모니터링 및 분기별 ESG 데이터 업데이트 트래킹"
         action_plan = risk_chain["action_plan"]
     
-    # 4. 생성 인공지능 기반 감사 리포트 구성 (중략 - 기존 프롬프트 및 로깅 엔진 작동)
+    # 5. 생성 인공지능 기반 감사 리포트 구성
     prompt = (
-       f"Context:\n{context_str}\n\n"
+        f"Context:\n{context_str}\n\n"
         f"Query: {user_query}\n"
         f"Strict Evaluation Status: {judgement_status}\n"
         f"Enforced Action Plan: {action_plan}\n\n"
@@ -412,20 +493,16 @@ def process_esg_compliance_query_advanced(user_query: str, partner_name: str) ->
         f"위 데이터와 지침을 기초로 협력사 감사 리포트를 Markdown 양식으로 구성해 주세요."
     )
     
-    start_time = time.time()
-    target_model = settings.mariadb_ollama_model
-    ai_resp = ollama_client.generate(model=target_model, prompt=prompt)["response"]
+    target_model = settings.mariadb_ollama_model    
+    try:
+        ai_resp = ollama_client.generate(model=target_model, prompt=prompt)["response"]
+    except Exception as e:
+        ai_resp = f"LLM 생성 실패.\n상태: {judgement_status}\n조치방안: {action_plan}"
+
     inference_duration = time.time() - start_time
     
-    save_ai_inference_log(
-        partner_name=partner_name,
-        query=user_query,
-        result_text=ai_resp,
-        status=judgement_status,
-        risk_chain=risk_chain,
-        ai_model=target_model,
-        duration=inference_duration
-    )
+    # 디버깅/보존용 인스턴스 로깅 (필요시 주석 해제)
+    save_ai_inference_log(partner_name, user_query, ai_resp, judgement_status, risk_chain, target_model, inference_duration)
     
     return {
         "evaluation_result": ai_resp,

@@ -5,27 +5,36 @@ import os
 import json
 from settings import safe_print
 from load import run_concurrent_ingestion_pipeline
-from engine import  process_esg_compliance_query_advanced
+from engine import process_esg_compliance_query_advanced, build_ontology_registry_from_jsonl
 
 if __name__ == "__main__":
     # 로컬 테스트 디렉토리 보장
     os.makedirs("./esg_pdf_files", exist_ok=True)
     os.makedirs("./esg_excel_files", exist_ok=True)
     
-    # print("=" * 70)
-    # print("💡 [Step 1] PDF/Excel 동시 적재 + 온톨로지 사전 빌드 + 허깅페이스 원격 백업")
-    # print("=" * 70)
+    # # ====================================================================
+    # # 🔄 [선택] 새 PDF/Excel 파일이 추가되어 데이터베이스 및 벡터 적재가 필요할 때만 주석 해제
+    # # ====================================================================
+    print("=" * 70)
+    print("💡 [Step 1] PDF/Excel 동시 적재 + 온톨로지 사전 빌드 + 허깅페이스 원격 백업")
+    print("=" * 70)
+    run_concurrent_ingestion_pipeline(
+        pdf_dir="./esg_pdf_files", 
+        excel_dir="./esg_excel_files",
+        hf_repo="Makesols/esg-vector-dataset"
+    )
     
-    # run_concurrent_ingestion_pipeline(
-    #     pdf_dir="./esg_pdf_files", 
-    #     excel_dir="./esg_excel_files",
-    #     hf_repo="Makesols/esg-vector-dataset"
-    # )
-    
+    # ====================================================================
+    # 🚀 [상시 실행] 수정 완료된 완성본 jsonl 기반으로 온톨로지 규칙을 초고속 로드 (서빙 레이어)
+    # ====================================================================
     print("\n" + "=" * 70)
-    print("💡 [Step 2] 복원된 온톨로지 규칙 룰 & 하이브리드 검색 기반 연산 추론 검증")
+    print("💡 [Step 2] 완성본 온톨로지 규칙 룰 & 하이브리드 검색 기반 연산 추론 검증")
     print("=" * 70)
     
+    # 파이프라인을 돌렸든 안 돌렸든, 수정된 완성본 JSONL을 최종 가드레일 규칙으로 바인딩합니다.
+    build_ontology_registry_from_jsonl(jsonl_path="./esg_ontology_template.jsonl")
+    
+    # 실시간 하이브리드 추론 검증 테스트
     sample_query = "보크사이트 채굴 현장에서 아동노동 및 강제노동 1건 확인"
     sample_partner = "Windalco"
     
@@ -35,10 +44,10 @@ if __name__ == "__main__":
             partner_name=sample_partner
         )
         
-        print("\n[백엔드 API 엔드포인트 수신 최종 JSON Payload]")
+        print("\n[백엔드 수신 최종 검증 완결형 JSON 응답 페이로드]")
         print("-" * 70)
         print(json.dumps(response_payload, indent=4, ensure_ascii=False))
         print("-" * 70)
         
     except Exception as e:
-        safe_print(f"[테스트 실패] 메인 스트림 엔진 구동 중 예외 발생: {e}")
+        safe_print(f"[런타임 테스트 실패] 가드레일 추론 처리 엔진 구동 오류: {e}")

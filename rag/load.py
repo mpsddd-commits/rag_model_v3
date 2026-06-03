@@ -83,54 +83,6 @@ def extract_and_chunk_pdf(pdf_path: str, chunk_size: int = 1200, chunk_overlap: 
         safe_print(f"[오류] PDF 정밀 파싱 실패 ({file_name}): {e}")
         
     return chunks
-# # ════════════════════════════════════════════════════════
-# # 0. PDF 텍스트 추출 및 슬라이딩 윈도우 청킹 (누락 방지 추가)
-# # ════════════════════════════════════════════════════════
-# def extract_and_chunk_pdf(pdf_path: str, chunk_size: int = 1200, chunk_overlap: int = 300) -> list:
-#     """150자 오버랩 연결 결합 세팅이 추가된 슬라이딩 윈도우 청킹 함수 (버그 수정 버전)"""
-#     chunks = []
-#     file_name = os.path.basename(pdf_path)
-#     try:
-#         reader = PdfReader(pdf_path)
-#         full_text = "".join([page.extract_text() or "" for page in reader.pages])
-        
-#         # 텍스트가 정상적으로 추출되었는지 가드레일 확인
-#         if not full_text.strip():
-#             safe_print(f"[경고] PDF 파일에서 텍스트를 추출할 수 없습니다. (스캔된 이미지 또는 보안 설정 확인 필요): {file_name}")
-#             return chunks
-
-#         # 연속된 공백 및 줄바꿈을 단일 공백으로 정제
-#         full_text = re.sub(r'\s+', ' ', full_text).strip()
-        
-#         # 500자 크기로 슬라이싱하되, 오버랩을 차감한 크기만큼 전진 (500 - 150 = 350자씩 이동)
-#         step = chunk_size - chunk_overlap
-#         if step <= 0: 
-#             step = chunk_size  # 예외 방지 가드레일
-
-#         # 루프 내부의 조기 break 제거 후 순수하게 range 제어권에 맡김
-#         for i in range(0, len(full_text), step):
-#             text_slice = full_text[i:i+chunk_size]
-            
-#             # 마지막 남은 자투리 텍스트가 너무 짧은 경우(예: 10자 미만) 무의미하므로 스킵 방지용 가드
-#             if not text_slice.strip():
-#                 continue
-                
-#             # 고유 식별을 위한 해시값 생성
-#             chunk_id = hashlib.md5(f"{file_name}_{i}_{text_slice[:20]}".encode()).hexdigest()
-#             chunks.append({
-#                 "chunk_id": chunk_id,
-#                 "file_name": file_name,
-#                 "content": text_slice,
-#                 "doc_type": "PDF",
-#                 "timestamp": datetime.datetime.now().isoformat()
-#             })
-            
-#         safe_print(f"[청킹 완료] 파일명: {file_name} -> 생성된 총 청크 수: {len(chunks)}개")
-                
-#     except Exception as e:
-#         safe_print(f"[오류] PDF 파싱 실패 ({file_name}): {e}")
-#     return chunks
-
 
 # ════════════════════════════════════════════════════════
 # 1. 마리아 DB 엑셀 적재 및 온톨로지 빌드 영역
@@ -265,7 +217,6 @@ def load_self_assess_checklist_to_mariadb(excel_dir: str):
         db.save_many(sql, checklist_rows)
         safe_print(f"\n[MariaDB 성공] 시트별 등급 분기 적용 완료 -> 총 {len(checklist_rows)}개 핵심 지표 마스터 적재 완료.")
 
-
 def load_risk_criteria_to_mariadb(excel_dir: str):
     """'자가진단_리스크_분류_기준.xlsx' 파일을 읽어 ESG_RISK_CRITERIA 테이블에 전수 적재합니다."""
     db.save("SET FOREIGN_KEY_CHECKS = 0;")
@@ -303,45 +254,20 @@ def load_risk_criteria_to_mariadb(excel_dir: str):
 
 
 def build_ontology_registry():
-    """MariaDB 데이터를 기반으로 복합 온톨로지 사전을 동기화 구축하고 engine.py의 캐시 레이어를 직접 갱신합니다."""
-    import engine  # 💡 중요: 순환 참조를 피하기 위해 함수 내부 임포트 수행 및 engine 상태 직접 조작
-    
-    engine._ONTOLOGY_REGISTRY.clear()
-    engine._ONTOLOGY_TEMPLATE_LIST.clear()
-    
-    sql = "SELECT indicator_no, indicator_name, question, action_plan FROM SELF_ASSESS_CHECKLIST"
-    rows = db.find_all(sql)
-    
-    for row in rows:
-        ind_name = row["indicator_name"]
-        raw_question = row["question"]
-        criteria_meta = parse_complex_criteria(raw_question)
-        
-        # engine.py 전역 딕셔너리와 리스트에 상태 직접 투영
-        engine._ONTOLOGY_REGISTRY[ind_name] = {
-            "indicator_no": row["indicator_no"],
-            "action_plan": row.get("action_plan", "즉시 시정 조치 가동"),
-            "raw_text": raw_question,
-            **criteria_meta
-        }
-        engine._ONTOLOGY_TEMPLATE_LIST.append({
-            "indicator_no": row["indicator_no"],
-            "indicator_name": ind_name,
-            "raw_expression": raw_question,
-            "meta": criteria_meta
-        })
-    safe_print(f"[온톨로지 엔지니어링] {len(engine._ONTOLOGY_REGISTRY)}개의 지표 온톨로지 복합 분기 규칙 동기화 완료.")
-
+    """MariaDB 데이터를 기반으로 사전 구축 후 로컬로 1차 백업을 수행합니다."""
+    import engine  
+    engine.build_ontology_registry() # 기존 MariaDB 빌더 트리거 호출
 
 def export_ontology_to_jsonl(output_filename: str = "esg_ontology_template.jsonl"):
     """구축된 온톨로지 리스트를 파인튜닝 지식 데이터 백업용 JSONL 파일로 출력합니다."""
     import engine
-    if not engine._ONTOLOGY_TEMPLATE_LIST: return
+    if not engine._ONTOLOGY_TEMPLATE_LIST: engine.build_ontology_registry()
+
     try:
         with open(output_filename, "w", encoding="utf-8") as f:
             for item in engine._ONTOLOGY_TEMPLATE_LIST:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
-        safe_print(f"[온톨로지 백업] AI 파인튜닝 포맷 이관 완료: {output_filename}")
+        safe_print(f"[온톨로지 백업] 엑셀/DB 파싱 데이터 1차 JSONL 추출 완료: {output_filename}")
     except Exception as e:
         safe_print(f"[온톨로지 백업 실패] : {e}")
 
@@ -603,18 +529,26 @@ def export_pgvector_to_hf(repo_id: str):
 # 3. 통합 파이프라인 제어 진입점 (Orchestrator)
 # ════════════════════════════════════════════════════════
 def run_concurrent_ingestion_pipeline(pdf_dir: str, excel_dir: str, hf_repo: str = None):
-    """Excel 마스터 데이터 및 PDF 임베딩 코사인 필터링, HF 클라우드 백업을 통합 수행하며 engine.py의 검색 구조를 갱신합니다."""
-    import engine  # 💡 engine.py 전역 인덱스 갱신을 위해 상호 레이어 바인딩 진행
+    """Excel 및 PDF 통합 파이프라인 가동 시 로컬 완성본 JSONL의 상태 가드라인을 최우선 연동합니다."""
+    import engine 
     
     safe_print("\n=== 🚀 [통합 파이프라인] 전처리 및 기준 기반 순차 적재 가동 ===")
     
-    # [단계 1] 마리아 DB 마스터 초기화 및 온톨로지 캐시 구조 로컬 주입
-    safe_print("[파이프라인 단계 1] MariaDB 마스터 테이블 구축 및 온톨로지 규칙 동기화...")
+    # [단계 1] 데이터베이스 기초 마스터 싱크
     load_self_assess_checklist_to_mariadb(excel_dir)
     load_risk_criteria_to_mariadb(excel_dir)
-    build_ontology_registry()
-    export_ontology_to_jsonl("esg_ontology_template.jsonl")
-    
+
+    # 🌟 만약 이미 수정한 로컬 'esg_ontology_template.jsonl' 파일이 있다면 
+    #     DB 데이터로 덮어쓰지 않고 로컬 파일의 최종 수정본 규칙을 그대로 캐시 엔진에 주입합니다.
+    if os.path.exists("esg_ontology_template.jsonl"):
+        safe_print("[파이프라인 레이어 알림] 기존 가공 완료된 esg_ontology_template.jsonl 검증판이 발견되어 로컬 로더를 실행합니다.")
+        engine.build_ontology_registry_from_jsonl("esg_ontology_template.jsonl")
+    else:
+        # 파일이 아예 존재하지 않는 최초 빌드 시에만 기본 Export 프로세스 작동
+        engine.build_ontology_registry()
+        # 로컬 백업용 원본 내보내기 함수 호출
+        export_ontology_to_jsonl("esg_ontology_template.jsonl")
+
     # [단계 2] PDF 로드 및 마스터 매칭 기반 PostgreSQL pgvector 데이터 저장
     safe_print("[파이프라인 단계 2] PDF 가공 및 마스터 지표 기반 코사인 유사도(>=0.5) 적재 필터링 가동...")
     pdf_chunks = []
