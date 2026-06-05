@@ -1,17 +1,15 @@
-'''
-MariaDB 및 PostgreSQL(pgvector) 데이터베이스 통합 관리 모듈
-'''
+# MariaDB 및 PostgreSQL(pgvector) 데이터베이스 통합 관리 모듈
 """
 Integrated Database Client for MariaDB and PostgreSQL.
 """
 import mariadb
 import psycopg2
-from settings import settings, safe_print
+from settings import settings, safePrint
 
 # ════════════════════════════════════════════════════════
 # MariaDB (Excel & Rule Criteria Master)
 # ════════════════════════════════════════════════════════
-def get_maria_conn():
+def getMariaConn():
     try:
         return mariadb.connect(
             user=settings.maria_db_user,
@@ -21,33 +19,33 @@ def get_maria_conn():
             port=settings.maria_db_port,
         )
     except mariadb.Error as e:
-        safe_print(f"[MariaDB 접속 오류] : {e}")
+        safePrint(f"[MariaDB 접속 오류] : {e}")
         return None
 
-def find_one(sql: str, params=None) -> dict | None:
-    conn = get_maria_conn()
+def findOne(sql: str, params=None) -> dict | None:
+    conn = getMariaConn()
     if not conn: return None
     try:
         with conn as c, c.cursor(dictionary=True) as cur:
             cur.execute(sql, params)
             return cur.fetchone()
     except mariadb.Error as e:
-        safe_print(f"MariaDB Error (find_one) : {e}")
+        safePrint(f"MariaDB Error (findOne) : {e}")
     return None
 
-def find_all(sql: str, params=None) -> list:
-    conn = get_maria_conn()
+def findAll(sql: str, params=None) -> list:
+    conn = getMariaConn()
     if not conn: return []
     try:
         with conn as c, c.cursor(dictionary=True) as cur:
             cur.execute(sql, params)
             return cur.fetchall()
     except mariadb.Error as e:
-        safe_print(f"MariaDB Error (find_all) : {e}")
+        safePrint(f"MariaDB Error (findAll) : {e}")
     return []
 
 def save(sql: str, params=None) -> bool:
-    conn = get_maria_conn()
+    conn = getMariaConn()
     if not conn: return False
     try:
         with conn as c, c.cursor(dictionary=True) as cur:
@@ -55,11 +53,11 @@ def save(sql: str, params=None) -> bool:
             conn.commit()
             return True
     except mariadb.Error as e:
-        safe_print(f"MariaDB Error (save) : {e}")
+        safePrint(f"MariaDB Error (save) : {e}")
     return False
 
-def save_many(sql: str, params=None) -> bool:
-    conn = get_maria_conn()
+def saveMany(sql: str, params=None) -> bool:
+    conn = getMariaConn()
     if not conn: return False
     try:
         with conn as c, c.cursor(dictionary=True) as cur:
@@ -67,43 +65,33 @@ def save_many(sql: str, params=None) -> bool:
             conn.commit()
             return True
     except mariadb.Error as e:
-        safe_print(f"MariaDB Error (save_many) : {e}")
+        safePrint(f"MariaDB Error (saveMany) : {e}")
     return False
 
 
 # ════════════════════════════════════════════════════════
 # PostgreSQL (pgvector Storage)
 # ════════════════════════════════════════════════════════
-def get_postgres_conn():
-    db_conn_str = settings.postgres_conn_str
+def getPostgresConn():
+    dbConnStr = settings.postgresConnStr
     try:
-        return psycopg2.connect(db_conn_str)
+        return psycopg2.connect(dbConnStr)
     except psycopg2.OperationalError as e:
-        target_db = settings.postgres_database
+        targetDb = settings.postgres_database
         if "does not exist" in str(e) or "database" in str(e).lower():
-            safe_print(f"[경고] '{target_db}' DB 없음. 자동 생성 시도...")
-            fallback = db_conn_str.replace(f"dbname={target_db}", "dbname=postgres")
+            safePrint(f"[경고] '{targetDb}' DB 없음. 자동 생성 시도...")
+            fallback = dbConnStr.replace(f"dbname={targetDb}", "dbname=postgres")
             try:
-                conn_pg = psycopg2.connect(fallback)
-                conn_pg.autocommit = True
-                with conn_pg.cursor() as cur:
+                connPg = psycopg2.connect(fallback)
+                connPg.autocommit = True
+                with connPg.cursor() as cur:
                     # "DB가 없으면 새로 생성하는 명령어"
-                    cur.execute(f"CREATE DATABASE {target_db};")
-                conn_pg.close()
-                return psycopg2.connect(db_conn_str)
+                    cur.execute(f"CREATE DATABASE {targetDb};")
+                connPg.close()
+                return psycopg2.connect(dbConnStr)
             except Exception as create_err:
-                safe_print(f"[오류] DB 자동 생성 실패: {create_err}")
+                safePrint(f"[오류] DB 자동 생성 실패: {create_err}")
                 raise e
         else:
             raise e
 
-
-# # Backward-compat camelCase aliases
-# getConn = get_conn
-# findOne = find_one
-# findAll = find_all
-# saveMany = save_many
-# addKey = add_key
-# getPageList = get_page_list
-# signUpTransaction = sign_up_transaction
-# executeTransaction = execute_transaction
