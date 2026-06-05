@@ -477,29 +477,35 @@ CREATE TABLE `NODE_HISTORY` (
 -- ══════════════════════════════════════════════════════════
 
 DROP TABLE IF EXISTS `AI_AGENT_RULE`;
+
 CREATE TABLE `AI_AGENT_RULE` (
-  rule_id         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '룰 ID (PK)',
-  indicator_no    INT          NOT NULL                COMMENT '지표 번호 (FK)',
-  rule_code       VARCHAR(50)  NOT NULL                COMMENT '룰 코드',
-  rule_name       VARCHAR(200) NOT NULL                COMMENT '룰명',
-  tier_scope      VARCHAR(30)                          COMMENT '적용 차수',
-  metric_key      VARCHAR(50)  NOT NULL                COMMENT '평가 대상 컬럼 키',
-  operator        VARCHAR(10)  NOT NULL                COMMENT '연산자',
-  threshold_value VARCHAR(100) NOT NULL                COMMENT '기준값',
-  warn_threshold  VARCHAR(100)                         COMMENT '주의 임계값',
-  fail_threshold  VARCHAR(100)                         COMMENT '부적합 임계값',
-  unit            VARCHAR(50)                          COMMENT '단위',
-  severity        VARCHAR(20)  NOT NULL DEFAULT 'WARN' COMMENT '심각도',
-  notify_yn       CHAR(1)      DEFAULT 'Y'             COMMENT '알림 발송 여부',
-  notify_template TEXT                                 COMMENT '알림 템플릿',
-  regulation      VARCHAR(100)                         COMMENT '관련 규제',
-  action_required TEXT                                 COMMENT '권장 조치',
-  active_yn       CHAR(1)      DEFAULT 'Y'             COMMENT '활성 여부',
-  priority        INT          DEFAULT 50              COMMENT '우선순위',
-  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '생성일시',
-  updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '수정일시',
-  PRIMARY KEY (rule_id), UNIQUE KEY uq_code (rule_code)
-) ENGINE=InnoDB COMMENT='AI Agent 룰셋';
+  `rule_id`         int(11)         NOT NULL          AUTO_INCREMENT               COMMENT '자동 생성 규칙 식별자',
+  `indicator_no`    int(11)         NOT NULL                                       COMMENT '원천 자가진단 문항 지표 번호',
+  `sub_id`          varchar(50)     NOT NULL          DEFAULT 'MAIN'               COMMENT '서브 지표 식별자 (예: PAH, DIOXIN, MAIN)',
+  `rule_code`       varchar(30)     NOT NULL                                       COMMENT '규칙 코드 (예: RULE_040)',
+  `rule_name`       varchar(255)    NOT NULL                                       COMMENT '규칙 이름',
+  `category`        varchar(50)     DEFAULT NULL                                   COMMENT '카테고리 (인권노동, 에너지기후, 공정품질 등)',
+  `tier_scope`      varchar(100)                                                   COMMENT '적용 차수',
+  `metric_key`      varchar(30)     NOT NULL                                       COMMENT '평가 대상 컬럼 키',
+  `operator`        varchar(10)     NOT NULL                                       COMMENT '비교 연산자 규칙',
+  `threshold_value` varchar(255)    NOT NULL                                       COMMENT '통과 임계값/합격기준 범위',
+  `fail_threshold`  varchar(255)    DEFAULT NULL                                   COMMENT '실패 기준 정의 문구',
+  `severity`        varchar(20)     NOT NULL DEFAULT 'WARN'                        COMMENT '리스크 심각도 (CRITICAL, FAIL, WARN)',
+  `notify_yn`       CHAR(1)         DEFAULT 'Y'                                    COMMENT '알림 발송 여부',
+  `notify_template` text            DEFAULT NULL                                   COMMENT '알림 가이드 템플릿',
+  `regulation`      varchar(255)    DEFAULT NULL                                   COMMENT '연계 글로벌 ESG 규제',
+  `action_required` text            DEFAULT NULL                                   COMMENT '불합격 시 권장 조치 방안 명세',
+  `active_yn`       char(1)         DEFAULT 'Y'                                    COMMENT '활성화 여부',
+  `priority`        int(11)         DEFAULT 50                                     COMMENT '알림 표출 우선순위 가중치',
+  `created_at`      timestamp       NOT NULL DEFAULT current_timestamp()           COMMENT '최초 생성 일시',
+  `updated_at`      timestamp       NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp() COMMENT '수정 일시',
+  PRIMARY KEY (`rule_id`),
+  UNIQUE KEY `uq_indicator_sub` (`indicator_no`, `sub_id`) -- 💡 indicator_no와 sub_id 조합으로 복합 유니크 키 생성
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 자동 감사 엔진용 마스터 룰셋 규격 테이블';
+
+
+
+
 
 DROP TABLE IF EXISTS `AI_AGENT_ALERT`;
 CREATE TABLE `AI_AGENT_ALERT` (

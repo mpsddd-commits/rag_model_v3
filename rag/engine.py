@@ -8,6 +8,7 @@ import json
 import time
 import ollama
 import numpy as np
+from datetime import datetime
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 
