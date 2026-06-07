@@ -11,8 +11,9 @@ import numpy as np
 from datetime import datetime
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
+from psycopg2.extras import RealDictCursor
 
-import dbClient as db
+import dbClient as db 
 from settings import settings, safePrint, simpleTokenizer
 
 # 싱글톤 인스턴스 전역 정의
@@ -197,6 +198,24 @@ def buildOntologyRegistryFromJsonl(jsonlPath: str = "./esgOntologyTemplate.jsonl
 # ════════════════════════════════════════════════════════
 # 🔍 Hybrid Retriever Engine (BM25 + pgvector + Rerank)
 # ════════════════════════════════════════════════════════
+def getEmbedding(text: str) -> list:
+    """Ollama에 로드된 임베딩 모델을 사용해 텍스트 벡터 추출"""
+    if not text or not text.strip():
+        return None
+    try:
+        # settings에 지정해 둔 임베딩 모델명이 있다면 그것을 쓰고, 
+        # 없다면 기본 llama3.1이나 bge-m3 등 할당된 모델명을 적어줍니다.
+        model_name = getattr(settings, "embed_model", settings.embed_model) 
+        
+        response = ollamaClient.embeddings(
+            model=model_name,
+            prompt=text
+        )
+        return response['embedding']
+    except Exception as e:
+        safePrint(f"❌ [Ollama Embedding Error]: {e}")
+        return None
+
 def searchHybridDocuments(userQuery: str, topK: int = 5) -> list:
     # 1. Sparse 검색 (BM25) 진행
     tokenizedQuery = simpleTokenizer(userQuery)
@@ -213,13 +232,29 @@ def searchHybridDocuments(userQuery: str, topK: int = 5) -> list:
     denseCandidates = []
     emb = getEmbedding(userQuery)
     if emb is not None:
-        # 코사인 거리 연산 결과가 가까운(유사도가 높은) 순으로 정렬되어 나옴
-        rows = db.findAll(
-            "SELECT content FROM esg_pdf_vectors ORDER BY embedding <=> %s::vector LIMIT %s;",
-            (emb, topK * 2)
-        )
-        for rank, r in enumerate(rows):
-            denseCandidates.append((r['content'], rank + 1)) # (텍스트, 순위)
+        pgConn = None
+        try:
+            # PostgreSQL 커넥션 확보 (없으면 DB 자동 생성까지 수행됨)
+            pgConn = db.getPostgresConn()
+            
+            # 결과 셋을 명세서 쿼리 규격(r['content'])에 맞추기 위해 RealDictCursor 사용
+            with pgConn.cursor(cursor_factory=RealDictCursor) as cur:
+                # 파이썬 리스트(emb)를 pgvector가 인식할 수 있는 문자열 형태로 포맷팅
+                emb_str = f"[{','.join(map(str, emb))}]"
+                
+                # pgvector 전용 코사인 거리 연산 쿼리 수행
+                query = "SELECT content FROM esg_pdf_vectors ORDER BY embedding <=> %s LIMIT %s;"
+                cur.execute(query, (emb_str, topK * 2))
+                rows = cur.fetchall()
+                
+                for rank, r in enumerate(rows):
+                    denseCandidates.append((r['content'], rank + 1)) # (텍스트, 순위)
+                    
+        except Exception as pg_err:
+            safePrint(f"[!] [pgvector 검색 장애]: {pg_err}")
+        finally:
+            if pgConn:
+                pgConn.close() # 커넥션 자원 반환
 
     # 3. RRF (Reciprocal Rank Fusion) 연산 수행
     # 공식: Score = 1 / (60 + Sparse_Rank) + 1 / (60 + Dense_Rank)
