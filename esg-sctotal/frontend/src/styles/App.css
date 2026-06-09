@@ -1,0 +1,181 @@
+/* ═══════════════════════════════════════════════════════════
+   App.css  ·  Alu-ESG Platform v4
+   ── App_v4.jsx 컴포넌트 보조 스타일
+   ── (Tailwind CSS로 대부분 처리되므로 최소 스타일만 포함)
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── 루트 컨테이너 ─────────────────────────────────────── */
+#root {
+  width: 100%;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+}
+
+/* ── Recharts 라이브러리 보정 ──────────────────────────── */
+.recharts-wrapper,
+.recharts-surface {
+  outline: none !important;
+}
+
+.recharts-tooltip-wrapper {
+  outline: none;
+  z-index: 100;
+}
+
+.recharts-default-tooltip {
+  background: rgba(15, 23, 42, 0.95) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  border-radius: 8px !important;
+  padding: 8px 12px !important;
+  font-size: 0.75rem !important;
+  color: #f1f5f9 !important;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3) !important;
+}
+
+.recharts-tooltip-label {
+  color: #fbbf24 !important;
+  font-weight: 700 !important;
+  margin-bottom: 4px !important;
+}
+
+.recharts-tooltip-item {
+  color: #e2e8f0 !important;
+  padding: 2px 0 !important;
+}
+
+/* ── Recharts 범례 폰트 통일 ───────────────────────────── */
+.recharts-legend-item-text {
+  color: #64748b !important;
+  font-size: 0.7rem !important;
+  font-weight: 500 !important;
+}
+
+/* ── Recharts 축 라벨 ──────────────────────────────────── */
+.recharts-cartesian-axis-tick-value {
+  fill: #94a3b8;
+  font-size: 0.65rem;
+}
+
+/* ── 차트 그리드 라인 ─────────────────────────────────── */
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: #f1f5f9;
+}
+
+/* ── 폴라(레이더) 차트 ─────────────────────────────────── */
+.recharts-polar-grid-angle line,
+.recharts-polar-grid-concentric path {
+  stroke: #e2e8f0;
+}
+
+/* ── 한글 폰트 강제 적용 (Recharts SVG 텍스트) ────────── */
+.recharts-text {
+  font-family: 'Pretendard', 'Noto Sans KR', sans-serif !important;
+}
+
+/* ── 표 행 클릭 시 효과 ───────────────────────────────── */
+tbody tr {
+  transition: background-color 0.12s ease;
+}
+
+/* ── 트리 노드 호버 ───────────────────────────────────── */
+.tree-node-hover:hover {
+  transform: translateX(2px);
+  transition: transform 0.15s ease;
+}
+
+/* ── 알림 패널 슬라이드 인 애니메이션 ─────────────────── */
+@keyframes notifSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.notif-panel {
+  animation: notifSlideIn 0.18s ease-out;
+}
+
+/* ── 카드 활성 상태 그림자 보정 ───────────────────────── */
+.card-active {
+  box-shadow: 0 0 0 2px #4f46e5, 0 4px 12px rgba(79, 70, 229, 0.15);
+}
+
+/* ── 입력 필드 포커스 보정 ─────────────────────────────── */
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+}
+
+/* ── 버튼 클릭 시 미세한 눌림 효과 ─────────────────────── */
+button:active:not(:disabled) {
+  transform: scale(0.98);
+  transition: transform 0.08s ease;
+}
+
+/* ── 비활성 버튼 ──────────────────────────────────────── */
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ── 로딩 스피너 (필요 시) ─────────────────────────────── */
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+/* ── 프린트 영역 ─────────────────────────────────────── */
+@media print {
+
+  aside,
+  header {
+    display: none !important;
+  }
+
+  main {
+    overflow: visible !important;
+  }
+}
+
+/* ── 메인 브랜드 컬러 및 본문 커스텀 스타일 ──────────────── */
+.bg-primary-green {
+  background-color: #03a94d !important;
+}
+
+.text-primary-text {
+  color: #333333 !important;
+}
+
+.bg-primary-dark-green {
+  background-color: #02823b !important;
+}
+
+.border-primary-green {
+  border-color: #03a94d !important;
+}
+
+.text-primary-green {
+  color: #03a94d !important;
+}
+
+/* 모바일 사이드바 트랜지션 보정 */
+.sidebar-transition {
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}

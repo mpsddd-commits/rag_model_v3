@@ -1,0 +1,23 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi-mail>=1.6.2",
+    "fastapi[standard]>=0.136.0",
+    "kafka-python>=2.3.1",
+    "jwcrypto>=1.5.7",
+    "httpx>=0.28.1",
+    "mariadb>=1.1.14",
+    "pathlib>=1.0.1",
+    "pydantic-settings>=2.13.1",
+    "redis>=7.4.0",
+    "uuid>=1.30",
+    "pydantic>=2.13.3",
+    "google-cloud-vision>=3.13.0",
+    "prometheus-fastapi-instrumentator>=7.1.0",
+    "pytest>=9.0.3",
+    "psycopg2>=2.9.12",
+]
