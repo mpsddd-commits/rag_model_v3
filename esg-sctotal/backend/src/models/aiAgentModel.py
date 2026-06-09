@@ -13,7 +13,7 @@ class aiAgentAnalyzeModel(BaseModel):
     triggerType : str           = Field("MANUAL", description="MANUAL/SCHEDULED/EVENT_DRIVEN")
     scope       : str           = Field("ALL", description="ALL/PARTNER/TIER/SINGLE_RULE")
     scopeTarget : Optional[str] = Field(None, description="partner_id 또는 tier_label")
-    aiModel     : str           = Field("GPT-4-Turbo", description="GPT-4-Turbo/Claude/Custom")
+    aiModel     : str           = Field("gemma4:e2b", description="gemma4:e2b")
 
 
 class aiAgentAckModel(BaseModel):

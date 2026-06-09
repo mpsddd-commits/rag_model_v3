@@ -217,41 +217,115 @@ def loadSelfAssessChecklistToMariadb(excelDir: str):
         db.saveMany(sql, checklistRows)
         safePrint(f"\n[MariaDB 성공] 시트별 등급 분기 적용 완료 -> 총 {len(checklistRows)}개 핵심 지표 마스터 적재 완료.")
 
+def cleanCriteriaText(text: str) -> str:
+    """
+    aiAgentNotify.py의 matched_criterion 맵과 100% 매싱되도록 
+    텍스트 내의 이모지, 개행문자, 특수기호 및 UI용 괄호 메타 정보를 제거합니다.
+    """
+    if not text or pd.isna(text):
+        return ""
+    
+    text = str(text).strip()
+    
+    # 1. 엑셀 특유의 개행문자(\r\n, \n) 및 탭 문자를 일반 공백 1칸으로 치환
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    
+    # 2. 이모지(🔴, 🟡, 🟢) 및 UI용 데코레이션 마크, 불릿(•) 기호 삭제
+    text = re.sub(r"[🔴🟡🟢•▪️▫️▶️]|[^\w\s\(\)~\-·,./]", "", text)
+    
+    # 3. 항목명(item_name) 매칭 시 혼선을 주는 영문 괄호 가이드 정리
+    #    예: "고위험 (High Risk)" -> "고위험", "우선순위 기준" -> "우선순위 기준"
+    text = re.sub(r"\s*\([^)]*\)", "", text)
+    
+    # 4. 연속된 공백 하나로 축소 및 최종 양끝 공백 제거
+    return re.sub(r"\s+", " ", text).strip()
+
 def loadRiskCriteriaToMariadb(excelDir: str):
-    """'자가진단_리스크_분류_기준.xlsx' 파일을 읽어 ESG_RISK_CRITERIA 테이블에 전수 적재합니다."""
-    db.save("SET FOREIGN_KEY_CHECKS = 0;")
-    db.save("TRUNCATE TABLE ESG_RISK_CRITERIA;")
-    db.save("SET FOREIGN_KEY_CHECKS = 1;")
+    """
+    [RDB 적재 레이어] '자가진단_리스크_분류_기준.xlsx' 원천 데이터를 로드하여
+    텍스트 가드레일 정제 후 ESG_RISK_CRITERIA 테이블에 안전하게 벌크 업서트합니다.
+    """
+    safePrint(f"[*] [ESG_RISK_CRITERIA] 리스크 분류 기준 마스터 적재 파이프라인 가동: {excelDir}")
     
-    riskCriteriaRows = []
-    seenItems = set()
+    # 디렉토리 내의 대상 파일 탐색 (CSV 또는 Excel 대응)
+    targetFiles = glob.glob(os.path.join(excelDir, "*리스크*분류*기준*.*"))
+    if not targetFiles:
+        safePrint(f"[!] 경고: {excelDir} 내에 리스크 분류 기준 매스터 파일이 존재하지 않습니다.")
+        return False
+        
+    targetPath = targetFiles[0]
+    safePrint(f"[*] 타겟 파일 포착: {targetPath}")
     
-    for pattern in ("*리스크*분류*.xlsx", "*리스크*분류*.xls", "자가진단_리스크_분류_기준.xlsx"):
-        for excelPath in glob.glob(os.path.join(excelDir, pattern)):
-            try:
-                xlDict = pd.read_excel(excelPath, sheet_name=None, header=1)
-                for sheetName, df in xlDict.items():
-                    safePrint(f"[리스크 분류 파싱] 파일: {os.path.basename(excelPath)} / 시트명: '{sheetName}'")
-                    for idx, row in df.iterrows():
-                        rowVals = [str(v).strip() if pd.notna(v) else "" for v in row.values]
-                        if len(rowVals) >= 4:
-                            itemName, highRisk, mediumRisk, lowRisk = rowVals[0], rowVals[1], rowVals[2], rowVals[3]
-                            if not itemName or itemName == "항목" or "기준 추천" in itemName:
-                                continue
-                            if itemName not in seenItems:
-                                riskCriteriaRows.append((itemName, highRisk, mediumRisk, lowRisk))
-                                seenItems.add(itemName)
-            except Exception as e:
-                safePrint(f"[오류] '{os.path.basename(excelPath)}' 리스크 기준 파싱 중 크리티컬 예외 발생: {e}")
+    try:
+        # 파일 확장자에 따라 pandas 판독 분기
+        if targetPath.endswith(".csv"):
+            # 첫 번째 줄이 타이틀 텍스트일 수 있으므로 header=1 처리 (제공된 CSV 명세 구조 반영)
+            df = pd.read_csv(targetPath, header=1, encoding="utf-8")
+        else:
+            df = pd.read_excel(targetPath, header=1)
+            
+        # 컬럼 매핑 표준화 (항목, 고위험, 중위험, 저위험)
+        df.columns = [col.strip() if isinstance(col, str) else f"col_{i}" for i, col in enumerate(df.columns)]
+        
+        # 필수 키 컬럼 존재 유무 확인 가드레일
+        requiredCols = ["항목", "고위험 (High Risk) 🔴", "중위험 (Medium Risk) 🟡", "저위험 (Low Risk) 🟢"]
+        # 유연한 매칭을 위해 컬럼 이름 전처리 비교
+        cleaned_columns = {cleanCriteriaText(c): c for c in df.columns}
+        
+        item_col = cleaned_columns.get("항목")
+        high_col = cleaned_columns.get("고위험")
+        medium_col = cleaned_columns.get("중위험")
+        low_col = cleaned_columns.get("저위험")
+        
+        if not (item_col and high_col and medium_col and low_col):
+            # 만약 이름 매칭이 안되면 인덱스 기준으로 강제 타게팅 가드레일 작동
+            item_col, high_col, medium_col, low_col = df.columns[0], df.columns[1], df.columns[2], df.columns[3]
 
-    if riskCriteriaRows:
-        sqlRisk = """
-            INSERT INTO ESG_RISK_CRITERIA (item_name, high_risk, medium_risk, low_risk) VALUES (%s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE high_risk = VALUES(high_risk), medium_risk = VALUES(medium_risk), low_risk = VALUES(low_risk);
+        recordsToInsert = []
+        
+        for _, row in df.iterrows():
+            raw_item = row.get(item_col)
+            if pd.isna(raw_item) or not str(raw_item).strip():
+                continue
+                
+            # 📌 [핵심 정제 플러그인] aiAgentNotify.py와 완벽 매칭을 위한 텍스트 표준화
+            item_name   = cleanCriteriaText(raw_item)
+            high_risk   = cleanCriteriaText(row.get(high_col))
+            medium_risk = cleanCriteriaText(row.get(medium_col))
+            low_risk    = cleanCriteriaText(row.get(low_col))
+            
+            # 리스크 분류 키워드가 정상적으로 추출된 경우에만 바인딩 리스트에 추가
+            if item_name:
+                recordsToInsert.append((item_name, high_risk, medium_risk, low_risk))
+                
+        if not recordsToInsert:
+            safePrint("[!] 파싱에 성공한 리스크 분류 마스터 데이터 행이 존재하지 않습니다.")
+            return False
+
+        # 📌 MariaDB Upsert SQL 문 가동 (동일 항목명 유입 시 실시간 최신 룰셋 업데이트)
+        upsertSql = """
+            INSERT INTO `ESG_RISK_CRITERIA` (
+                item_name, high_risk, medium_risk, low_risk
+            ) VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                high_risk   = VALUES(high_risk),
+                medium_risk = VALUES(medium_risk),
+                low_risk    = VALUES(low_risk),
+                updated_at  = NOW()
         """
-        db.saveMany(sqlRisk, riskCriteriaRows)
-        safePrint(f"[MariaDB 성공] ESG_RISK_CRITERIA 테이블에 총 {len(riskCriteriaRows)}건의 마스터 기준 적재 완료.")
+        
+        # dbClient의 saveMany 인터페이스를 통해 안전하게 트랜잭션 커밋
+        success = db.saveMany(upsertSql, recordsToInsert)
+        if success:
+            safePrint(f"[+] [ESG_RISK_CRITERIA] 벌크 업서트 성공: 총 {len(recordsToInsert)}개의 표준 가드레일 항목 적재.")
+            return True
+        else:
+            safePrint("[!] 에러: 데이터베이스 적재 트랜잭션 수행 중 에러가 발생했습니다.")
+            return False
 
+    except Exception as e:
+        safePrint(f"[!] [loadRiskCriteriaToMariadb] 예외 에러 발생: {e}")
+        return False
 
 def buildOntologyRegistry():
     """MariaDB 데이터를 기반으로 사전 구축 후 로컬로 1차 백업을 수행합니다."""

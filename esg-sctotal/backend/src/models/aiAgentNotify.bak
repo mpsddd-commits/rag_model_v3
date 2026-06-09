@@ -1,0 +1,497 @@
+# ────────────────────────────────────────────────────────────────────────────
+# [역할] AI Agent 전용 알람 비즈니스 로직 및 개별 문항 risk_level 주입 엔진
+#        (agentPipeline.py의 고확률 수치 정제 알고리즘 반영 완료)
+#
+# [처리 흐름]
+#   1. AI_AGENT_RULE 테이블에서 활성 룰 조회
+#   2. 대상 협력사의 자가진단 답변 데이터(SELF_ASSESS_ANSWER) 로드
+#   3. 정규식 기반 복잡한 서술 문맥 내 실수(float) 정제 파싱 기법 적용
+#   4. operator + threshold_value로 가드레일 평가 연산
+#   5. [핵심] 개별 문항의 실시간 위반 상태를 risk_level 컬럼에 '정상'/'주의'/'심각' 주입
+#   6. 위반 시 AI_AGENT_ALERT INSERT + notify.py sendNotify() 호출
+#   7. AI_AGENT_RUN_LOG에 세부 통계 기록 및 COMPANY 마스터 위험 등급 리프레시
+# ────────────────────────────────────────────────────────────────────────────
+
+import json
+import time
+import re
+import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import ollama
+from sentence_transformers import CrossEncoder
+from datetime import datetime
+from typing import Optional, List
+from src.utils.db import findAll, findOne, save, addKey
+from src.models.notify import sendNotify, notifyType
+from src.utils.settings import settings, safePrint, simpleTokenizer
+from src.utils.dbClient import getPostgresConn
+
+# =====================================================================
+# 🌟 [통합 인프라 1] 글로벌 싱글톤 인스턴스 및 인메모리 상태 관리 풀
+# =====================================================================
+os.environ["OLLAMA_HOST"] = settings.ollama_host
+ollamaClient = ollama.Client(host=settings.ollama_host)
+reranker = CrossEncoder(settings.rerank_model)
+
+# 하이브리드 검색을 위한 인메모리 캐시 풀
+bm25Index = None
+globalChunksPool = []
+_ONTOLOGY_REGISTRY: dict = {}
+_ONTOLOGY_TEMPLATE_LIST: list = []
+
+
+async def generateAiAlertConsultingWithReranker(indicator_no: str, rule_name: str, user_answer: str, threshold: str, operator: str) -> dict:
+    """
+    [engine.py 의존성 Zero] 
+    pgvector 1차 검색 -> CrossEncoder 2차 리랭킹 -> Gemma 4:e2b 최종 요약 컨설팅 파이프라인
+    """
+    context_str = ""
+    # LLM 및 리랭커에게 던질 기준 질의(Query) 생성
+    rag_query = f"{rule_name} 지표 {indicator_no} 글로벌 ESG 규제 가이드라인 조치 사항"
+
+    # ── [Step 1] pgvector 1차 거친 검색 (Rough Retrieval) ──
+    try:
+        conn = getPostgresConn()
+        if conn:
+            conn.autocommit = True
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            clean_keyword = re.sub(r'[^가-힣a-zA-Z0-9\s]', '', rule_name)
+            
+            # 리랭킹을 위해 1차로 넉넉하게 Top 10~15개의 관련 문서를 가져옵니다.
+            query_sql = """
+                SELECT content 
+                FROM `ESG_PDF_CHUNKS` 
+                WHERE (content LIKE %s OR content LIKE %s)
+                ORDER BY id DESC
+                LIMIT 15
+            """
+            cursor.execute(query_sql, (f"%{clean_keyword}%", f"%{indicator_no}%"))
+            rows = cursor.fetchall()
+            
+            cursor.close()
+            conn.close()
+
+            # ── [Step 2] CrossEncoder 기반 문맥 정밀 리랭킹 (Reranking 레이어 이식) ──
+            if rows:
+                raw_chunks = [r["content"] for r in rows]
+                # (Query, Document) 쌍을 구조화하여 크로스 인코더 스코어링 진행
+                pairs = [[rag_query, chunk] for chunk in raw_chunks]
+                scores = reranker.predict(pairs)
+                # 점수와 함께 매칭 후 역순 정렬
+                scored_chunks = sorted(zip(scores, raw_chunks), key=lambda x: x[0], reverse=True)
+                # 리랭킹 기준 최상위 고득점 청크 3개만 최종 컨텍스트로 차출
+                top_k_chunks = [chunk for score, chunk in scored_chunks[:3]]
+                context_str = "\n\n".join(top_k_chunks)
+            else:
+                context_str = f"글로벌 ESG 공급망 실사 가이드라인 표준 규격 및 알루미늄 업스트림 {rule_name} 행정 지침"
+        else:
+            context_str = "로컬 인프라 세션 오픈 불능으로 기본 실사 가이드라인을 참조합니다."
+            
+    except Exception as pg_err:
+        safePrint(f"[리랭커 RAG 레이어 경고] 임베딩/리랭킹 파이프라인 실패 (백업 가동): {pg_err}")
+        context_str = f"글로벌 공급망 실사법(CSDDD), EU REACH 규제 가이드라인 표준 문서"
+
+    # ── [Step 3] Ollama Gemma 통신 레이어 ──
+    prompt = f"""
+    [역할]
+    당신은 엄격하고 전문적인 글로벌 ESG 공급망 실사 감사관이자 알루미늄 산업 전문 컨설턴트입니다.
+    협력사가 자가진단 문항에서 원청사의 공급망 가드레일 규칙을 위반했습니다. 
+    리랭킹 필터링을 거쳐 제공된 '참조 규제 가이드라인 컨텍스트'를 엄격히 파악하여 관리자 보고용 정밀 분석 의견과 협력사 송부용 조치 권고안을 작성하세요.
+
+    [위반 데이터]
+    - 지표 번호: {indicator_no}
+    - 규칙명: {rule_name}
+    - 위반 기준: {operator} {threshold}
+    - 협력사 실제 답변 내용: "{user_answer}"
+
+    [참조 규제 가이드라인 (Reranked Context)]
+    {context_str}
+
+    [작성 지침]
+    1. 결과물은 반드시 JSON 형식으로만 응답해야 하며, 부연 설명이나 마크다운 코드 블록 태그(```json)를 절대 붙이지 마십시오.
+    2. 'ai_reasoning'은 관리자 보고용으로 위반 원인, 규제 영향도(CSDDD, REACH 등)를 날카롭게 짚어내는 감사 의견으로 작성하세요. (3문장 내외)
+    3. 'ai_recommendation'은 즉시(D+7 이내) 이행해야 하는 구체적인 엔지니어링/행정적 개선 조치 계획을 마크다운 리스트 형태로 제시하세요.
+
+    [출력 포맷 예시]
+    {{"ai_reasoning": "위반 원인 분석...", "ai_recommendation": "- 즉시 조치 사항 1\\n- 단기 개선 계획 2"}}
+    """
+
+    try:
+        response = await ollamaAsyncClient.chat(
+            model="gemma4:e2b",
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.2, "top_p": 0.8}
+        )
+        
+        raw_text = response['message']['content'].strip()
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("```")[1]
+            if raw_text.startswith("json"):
+                raw_text = raw_text[4:]
+        raw_text = raw_text.strip("`").strip()
+        
+        return json.loads(raw_text)
+    except Exception as e:
+        safePrint(f"[독립형 리랭커-AI 가동 오류] {e}")
+        return {
+            "ai_reasoning": f"시스템 규칙 엔진에 의해 규칙 임계치 위반이 자동 탐지되었습니다. ({rule_name})",
+            "ai_recommendation": "- 담당 장비/프로세스의 실측 로그를 점검하십시오.\n- 규제(CSDDD/REACH) 위반 여부를 내부 검토하십시오."
+        }
+
+
+class aiAgentNotifyType:
+    AI_AGENT = "AI_AGENT"   # AI Agent가 감지한 위반 알람
+
+
+# =====================================================================
+# 📌 [agentPipeline 이식] load.py 구조 기반 서술형 문장 내 수치 자동 정제 엔진
+# =====================================================================
+def extractNumericValueFromText(text: str):
+    """
+    제품명/규격번호(4자리 숫자 등)를 필터링하고 문장 내에서 
+    핵심 실수(float) 데이터를 안전하게 추출하는 가드레일 함수
+    """
+    if not text:
+        return None
+        
+    # 1. 전처리 가드레일: 의도치 않은 메타 숫자(4자리 제품명 3003, ASTM B209 등) 클렌징
+    cleanText = re.sub(r"\b\d{4}\b", "", text)
+    cleanText = re.sub(r"B\d+", "B", cleanText)
+
+    # 2. 퍼센트 기호(%)가 붙어 있는 핵심 기입 데이터를 우선 포착
+    percentMatch = re.search(r"(\d+\.\d+|\d+)\s*%", cleanText)
+    if percentMatch:
+        return float(percentMatch.group(1))
+
+    # 3. 일반적인 수치 정규식 탐색
+    nums = re.findall(r"\d+\.\d+|\d+", cleanText)
+    if nums:
+        return float(nums[0])
+    return None
+
+
+def buildSupplierAnswers(answers: list) -> dict:
+    """raw 답변 리스트를 AI 룰 엔진이 즉시 매칭할 수 있는 정제 딕셔너리로 맵핑"""
+    supplierAnswers = {}
+    for ans in answers:
+        ino = ans.get("indicator_no")
+        text = str(ans.get("answer_text", "")).strip()
+        
+        # 기본 텍스트 원본 보존
+        supplierAnswers[str(ino)] = text
+        supplierAnswers[ino] = text
+        
+        # 수치 추출 성공 시 실수 데이터로 가중치 덮어쓰기
+        extracted_num = extractNumericValueFromText(text)
+        if extracted_num is not None:
+            supplierAnswers[str(ino)] = extracted_num
+            supplierAnswers[ino] = extracted_num
+    return supplierAnswers
+
+
+# =====================================================================
+# 🚀 [핵심 추론 엔진] agentPipeline 사양 기반의 고도화된 수동/자동 전수조사 함수
+# =====================================================================
+async def runAiAgentAnalysis(
+    triggeredBy: int,
+    triggerType: str = "MANUAL",
+    scope: str = "ALL",
+    scopeTarget: Optional[str] = None,
+    aiModel: str = "gemma4:e2b"
+    ) -> dict:
+    """
+    [대시보드 메인 컨트롤러] 원청사 관리자가 대시보드 버튼을 눌렀을 때 
+    정밀 전처리 및 문항별 risk_level 적재 메커니즘을 적용하여 전수조사를 수행합니다.
+    """
+    startTime = time.time()
+    
+    # 1. 분석 대상 회사 목록 바인딩 (partner_id를 메인 룩업으로 사용)
+    if scope == "PARTNER" and scopeTarget:
+        # partner_id를 조건으로 조회하되, 알림 연동용 고유 PK인 id(company_id)도 함께 select
+        companies = findAll("SELECT partner_id, id AS company_id, company_name FROM `COMPANY` WHERE partner_id = ? AND delete_yn = 0", (scopeTarget,))
+    else:
+        companies = findAll("SELECT partner_id, id AS company_id, company_name FROM `COMPANY` WHERE delete_yn = 0")
+
+    if not companies:
+        return {"status": False, "message": "분석 대상 협력사가 존재하지 않습니다."}
+
+    # 2. 마스터 실행 로그 인스턴스 생성 (AI_AGENT_RUN_LOG)
+    runId = addKey("""
+        INSERT INTO `AI_AGENT_RUN_LOG` (
+            trigger_type, scope, scope_target, rules_evaluated, 
+            alerts_generated, critical_count, fail_count, warn_count, 
+            status, started_at
+        ) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 'RUNNING', NOW())
+    """, (triggerType, scope, scopeTarget or "ALL"))
+
+    # 3. 마스터 활성 규칙 동적 로드
+    ruleRows = findAll("SELECT * FROM `AI_AGENT_RULE` WHERE active_yn = 'Y'")
+    riskCriteriaRows = findAll("SELECT item_name, high_risk, medium_risk, low_risk FROM `ESG_RISK_CRITERIA`")
+
+    # 빠른 매칭을 위한 딕셔너리 캐싱화 (분류 항목별 맵핑)
+    criteriaMap = {row["item_name"]: row for row in riskCriteriaRows}
+
+    totalAlertsGenerated = 0
+    totalCritical = 0
+    totalHigh = 0
+    totalMedium = 0
+    
+    # 4. 회사별 순회 처리 (루프를 쪼개거나 2번 돌릴 필요 없음)
+    for comp in companies:
+        partnerCode = comp["partner_id"]  # 시스템 비즈니스 전반에 매핑되는 메인 마스터 키
+        companyDbId = comp["company_id"]  # 알림 전송용 매개변수로만 사용됨
+        
+        # 모든 마스터 답변 조회 기준은 설계하신 대로 partner_id(partnerCode)를 룩업 키로 집중 사용
+        raw_answers = findAll("""
+            SELECT id, indicator_no, answer_text 
+            FROM `SELF_ASSESS_ANSWER` 
+            WHERE partner_id = ? AND version = (
+                SELECT COALESCE(MAX(version), 1) FROM `SELF_ASSESS_ANSWER` WHERE partner_id = ? AND delete_yn = 0
+            ) AND delete_yn = 0
+        """, (partnerCode, partnerCode))
+        
+        if not raw_answers:
+            continue
+
+        # 수치 자동 파싱 헬퍼 가동 (서술형 문장 수치 추출)
+        supplierAnswers = buildSupplierAnswers(raw_answers)
+        
+        # 협력사 도메인별 실시간 리스크 등급 카운터
+        compCriticalCount = 0
+        compHighCount = 0
+        compMediumCount = 0
+        
+        for ans in raw_answers:
+            ans_db_id = ans["id"]
+            ino = ans["indicator_no"]
+            user_raw_text = ans["answer_text"]
+            
+            userValue = supplierAnswers.get(ino)
+            matched_rules = [r for r in ruleRows if r["indicator_no"] == ino]
+            
+            current_item_risk = "정상"
+            
+            if not matched_rules:
+                save("UPDATE `SELF_ASSESS_ANSWER` SET risk_level = '정상' WHERE id = ?", (ans_db_id,))
+                continue
+
+            for rule in matched_rules:
+                ruleId = rule["rule_id"]
+                op = rule["operator"]
+                th_str = rule["threshold_value"]
+                m_key = rule["metric_key"]
+                severity_upper = rule["severity"].strip().upper() # CRITICAL, HIGH, MEDIUM
+                ruleName = rule["rule_name"]
+
+                isViolated = False
+                deviationPct = 0.0
+                
+                # ── [agentPipeline 기준 룰 매칭 연산 가드레일] ──
+                try:
+                    if m_key == "NUMERIC" and userValue is not None:
+                        floatUser = float(userValue)
+                        floatThreshold = float(th_str)
+                        if op == "<" and not (floatUser < floatThreshold): isViolated = True
+                        elif op == "<=" and not (floatUser <= floatThreshold): isViolated = True
+                        elif op == ">" and not (floatUser > floatThreshold): isViolated = True
+                        elif op == ">=" and not (floatUser >= floatThreshold): isViolated = True
+                        elif op == "==" and not (floatUser == floatThreshold): isViolated = True
+                        
+                        if isViolated and floatThreshold != 0:
+                            deviationPct = round(((floatUser - floatThreshold) / floatThreshold) * 100, 2)
+                    
+                    elif m_key == "BOOL":
+                        normUser = str(userValue).strip().upper()
+                        if "Y" in op and normUser != "Y": isViolated = True
+                        elif "N" in op and normUser != "N": isViolated = True
+                        
+                    elif m_key == "RANGE" and "~" in th_str and userValue is not None:
+                        floatUser = float(userValue)
+                        min_v, max_v = map(float, th_str.split("~"))
+                        if not (min_v <= floatUser <= max_v): isViolated = True
+                except:
+                    isViolated = True  # 원천 텍스트가 비교 불가능하거나 파싱 오류 시 안전 위반 처리
+
+                if isViolated:
+                    totalAlertsGenerated += 1
+
+                    ai_consulting = await generateAiAlertConsultingWithReranker(
+                        indicator_no=ino,
+                        rule_name=ruleName,
+                        user_answer=str(userValue or user_raw_text),
+                        threshold=th_str,
+                        operator=op
+                    )
+
+                    # ── ESG_RISK_CRITERIA 기준 매칭 정의 ──
+                    matched_criterion = criteriaMap.get(ruleName) or next((v for k, v in criteriaMap.items() if k in ruleName), None)
+
+                    reasoning_text = ai_consulting.get("ai_reasoning", "정성 분석 진행 중")
+                    recommendation_text = ai_consulting.get("ai_recommendation", "- 즉시 소명 자료 제출")
+
+                    if matched_criterion:
+                        if severity_upper == "CRITICAL":
+                            reasoning_text = f"리스크 고위험(CRITICAL) 기준 부합: {matched_criterion['high_risk']}"
+                        elif severity_upper == "HIGH":
+                            reasoning_text = f"리스크 중위험(HIGH) 기준 부합: {matched_criterion['medium_risk']}"
+                        else:
+                            reasoning_text = f"리스크 일반(MEDIUM) 기준 부합: {matched_criterion['low_risk']}"
+
+                    # 📌 문항별 세부 카운팅 분기 처리 및 문항 내부 알림 레벨 확정
+                    if severity_upper == "CRITICAL":
+                        current_item_risk = "심각"
+                        totalCritical += 1
+                        compCriticalCount += 1
+                    elif severity_upper == "HIGH":
+                        if current_item_risk != "심각":
+                            current_item_risk = "주의"
+                        totalHigh += 1
+                        compHighCount += 1
+                    else: # MEDIUM
+                        if current_item_risk not in ["심각", "주의"]:
+                            current_item_risk = "주의"
+                        totalMedium += 1
+                        compMediumCount += 1
+
+                    # 실시간 위반 내역 상세 적재 (AI_AGENT_ALERT)
+                    alertTitle = f"[공급망 실사 위반] {rule['rule_name']}"
+                    alertContent = f"추출값 '{userValue}'가 기준 [{op} {th_str}]을 벗어났습니다."
+                    
+                    alertId = addKey("""
+                        INSERT INTO `AI_AGENT_ALERT` (
+                            rule_id, partner_id, indicator_no, metric_key, actual_value, threshold_value,
+                            deviation_pct, severity, ai_confidence, ai_reasoning, ai_recommendation,
+                            alert_title, alert_content, regulation, status, run_id, delete_yn
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 98.50, ?, ?, ?, ?, ?, 'OPEN', ?, 0)
+                    """, (
+                        ruleId, partnerCode, ino, m_key, str(userValue or user_raw_text), th_str,
+                        deviationPct, severity_upper, reasoning_text, rule.get("action_required"),
+                        alertTitle, alertContent, rule.get("regulation"), runId
+                    ))
+
+                    # ─────────────────────────────────────────────────────────────────
+                    # 🎯 5. [수정 완료] NOTIFY_CONFIG 포맷 맞춤형 공통 알림 연동 및 웹소켓 푸시
+                    # ─────────────────────────────────────────────────────────────────
+                    
+                    # AI_AGENT_RULE 테이블의 action_required 컬럼 값 파싱
+                    action_raw = rule.get("action_required") or "별도 가이드라인 참조"
+                    # 조치 계획 텍스트가 알림창에 너무 길게 표시되지 않도록 25자 내외로 슬라이싱 가드레일 적용
+                    action_short_cleaned = action_raw[:30] + "..." if len(action_raw) > 25 else action_raw
+
+                    # 알림 중요도 등급 한글화 맵핑 (심각 / 주의)
+                    status_korean = "심각(위반)" if severity_upper in ["CRITICAL", "FAIL"] else "주의"
+
+                    sendNotify(
+                        partnerId  = partnerCode,
+                        companyId  = companyDbId,
+                        notifyType = notifyType.AI_AGENT,
+                        meta = {
+                            "partner_name" : comp["company_name"],
+                            "status"       : status_korean,
+                            "action_short" : action_short_cleaned,
+                            "partner_id"   : partnerCode,
+                            "alert_id"     : alertId,
+                            "indicator_no" : ino
+                        }
+                    )
+
+            # 📌 [요구사항 구현 완료] 가드레일 심사가 끝난 문항의 risk_level 업데이트
+            save("UPDATE `SELF_ASSESS_ANSWER` SET risk_level = ? WHERE id = ?", (current_item_risk, ans_db_id))
+
+        # ── 🎯 [요구사항 커스텀 가드레일] 회사 레벨 리스크 종합 등급 재정의 ──
+        if compCriticalCount >= 1:
+            companyRisk = "고위험군"      # CRITICAL이 단 1개라도 있으면 무조건 고위험
+        elif compHighCount >= 1:
+            companyRisk = "중위험군"        # CRITICAL은 없지만 HIGH가 1개라도 있으면 중위험
+        else:
+            companyRisk = "저위험군"        # 다 정상이거나 MEDIUM에만 문제가 있을 때 저위험
+
+        save("UPDATE `COMPANY` SET risk_level = ? WHERE partner_id = ? AND delete_yn = 0", (companyRisk, partnerCode))
+
+    # 6. 마스터 실행 로그 정보 업데이트 마감 (AI_AGENT_RUN_LOG)
+    durationMs = int((time.time() - startTime) * 1000)
+    finalStatus = "SUCCESS" if totalAlertsGenerated == 0 else "ALERT"
+    aiSummary = f"분석 완료. [통계] CRITICAL: {totalCritical}건, HIGH: {totalHigh}건, MEDIUM: {totalMedium}건 적발."
+    
+    # 예전 규격 컬럼과의 맵핑 호환성을 유지하여 적재
+    save("""
+        UPDATE `AI_AGENT_RUN_LOG` 
+        SET status = ?, rules_evaluated = ?, alerts_generated = ?,
+            critical_count = ?, fail_count = ?, warn_count = ?,
+            ai_model = ?, ai_summary = ?, duration_ms = ?, ended_at = NOW()
+        WHERE run_id = ?
+    """, (finalStatus, len(ruleRows), totalAlertsGenerated, totalCritical, totalHigh, totalMedium, aiModel, aiSummary, durationMs, runId))
+
+    return {
+        "status": True,
+        "message": "AI Agent 전체 분석 완료",
+        "runId": runId,
+        "alertsGenerated": totalAlertsGenerated,
+        "criticalCount": totalCritical,
+        "highCount": totalHigh,
+        "mediumCount": totalMedium
+    }
+
+
+# =====================================================================
+# 데이터 조회 및 단단한 상태 조치 레이어 (기존 API 엔드포인트 의존성 보존)
+# =====================================================================
+def getAiAgentAlertList(partnerId: Optional[str] = None, severity: Optional[str] = None, status: Optional[str] = "OPEN", limit: int = 50) -> List[dict]:
+    whereClauses = ["delete_yn = 0"]
+    params = []
+    if partnerId:
+        whereClauses.append("partner_id = ?")
+        params.append(partnerId)
+    if severity:
+        whereClauses.append("severity = ?")
+        params.append(severity.upper())
+    if status:
+        whereClauses.append("status = ?")
+        params.append(status.upper())
+    
+    whereStr = " AND ".join(whereClauses)
+    sql = f"""
+        SELECT alert_id, rule_id, partner_id, indicator_no, metric_key,
+               actual_value, threshold_value, deviation_pct, severity,
+               ai_confidence, ai_reasoning, ai_recommendation,
+               alert_title, alert_content, regulation, status,
+               detected_at, alarm_id
+        FROM `AI_AGENT_ALERT`
+        WHERE {whereStr}
+        ORDER BY detected_at DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    return findAll(sql, tuple(params))
+
+
+def acknowledgeAiAgentAlert(alertId: int, userId: int) -> dict:
+    save("""
+        UPDATE `AI_AGENT_ALERT`
+        SET status = 'ACKNOWLEDGED', acknowledged_by = ?, acknowledged_at = NOW()
+        WHERE alert_id = ? AND delete_yn = 0
+    """, (userId, alertId))
+    return {"status": True, "alertId": alertId}
+
+
+def resolveAiAgentAlert(alertId: int, userId: int, resolutionNote: str) -> dict:
+    save("""
+        UPDATE `AI_AGENT_ALERT`
+        SET status = 'RESOLVED', resolved_by = ?, resolved_at = NOW(), resolution_note = ?
+        WHERE alert_id = ? AND delete_yn = 0
+    """, (userId, resolutionNote, alertId))
+    return {"status": True, "alertId": alertId}
+
+
+def getAiAgentRunLogList(limit: int = 20) -> List[dict]:
+    sql = """
+        SELECT run_id, trigger_type, scope, scope_target, ai_model,
+               rules_evaluated, alerts_generated, critical_count, fail_count, warn_count,
+               status, ai_summary, error_message, duration_ms, started_at, ended_at
+        FROM `AI_AGENT_RUN_LOG`
+        ORDER BY started_at DESC
+        LIMIT ?
+    """
+    return findAll(sql, (limit,))

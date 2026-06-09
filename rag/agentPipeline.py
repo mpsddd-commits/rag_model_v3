@@ -25,13 +25,14 @@ def syncOntologyRulesToDb(jsonlPath="./esgOntologyTemplate.jsonl"):
     # SELF_ASSESS_CHECKLIST 테이블로부터 지표별 마스터 메타 정보 로드
     indicatorMetaMap = {}
     try:
-        mappingRows = db.findAll("SELECT indicator_no, partner_type, category FROM SELF_ASSESS_CHECKLIST")
+        mappingRows = db.findAll("SELECT indicator_no, partner_type, category, priority FROM SELF_ASSESS_CHECKLIST")
         for row in mappingRows:
             ino = row["indicator_no"]
             if ino not in indicatorMetaMap:
                 indicatorMetaMap[ino] = {
                     "partner_type": row["partner_type"],
-                    "category": row["category"]
+                    "category": row["category"],
+                    "priority": str(row["priority"]).strip().upper() if row.get("priority") else "WARN"
                 }
         safePrint(f"[*] [매핑 동기화] SELF_ASSESS_CHECKLIST로부터 {len(indicatorMetaMap)}개의 원천 지표 메타데이터를 캐싱했습니다.")
     except Exception as e:
@@ -97,10 +98,11 @@ def syncOntologyRulesToDb(jsonlPath="./esgOntologyTemplate.jsonl"):
                     indicator_no = data["indicator_no"]
                     sub_id = data.get("sub_id", "MAIN")
                     
-                    metaInfo = indicatorMetaMap.get(indicator_no, {"partner_type": "3차 적용", "category": "기타"})
+                    metaInfo = indicatorMetaMap.get(indicator_no, {"partner_type": "3차 적용", "category": "기타", "priority": "WARN"})
                     db_category = metaInfo["category"]
                     db_tier_scope = metaInfo["partner_type"]
-                    
+                    db_severity = metaInfo["priority"] if metaInfo["priority"] in ["CRITICAL", "HIGH", "MEDIUM"] else "WARN"
+
                     rule_code = f"RULE_{str(indicator_no).zfill(3)}"
                     if sub_id != "MAIN":
                         rule_code += f"_{sub_id}"
@@ -142,9 +144,9 @@ def syncOntologyRulesToDb(jsonlPath="./esgOntologyTemplate.jsonl"):
                         op,                           
                         db_threshold,                 
                         f"기준 스펙 범주 이탈 ({op} {db_threshold})", 
-                        "WARN",                       
+                        db_severity,                       
                         data["action_plan"],
-                        db_regulation # 13번째 변수: regulation 컬럼 바인딩 추가
+                        db_regulation 
                     )
                     recordsToInsert.append(record)
 
@@ -169,7 +171,6 @@ def syncOntologyRulesToDb(jsonlPath="./esgOntologyTemplate.jsonl"):
     finally:
         if conn and conn.open:
             conn.close()
-
 
 # =====================================================================
 # 2. 공급망 ESG 자가진단 위반 탐지 및 감사 결과 실시간 감사 에이전트 구동

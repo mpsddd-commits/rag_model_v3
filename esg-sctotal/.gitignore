@@ -143,7 +143,6 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-node_modules/
 
 # Spyder project settings
 .spyderproject
@@ -228,3 +227,5 @@ esgExcelFiles/
 esgPdfFiles/
 licenseFiles/
 secrets/
+
+node_modules/

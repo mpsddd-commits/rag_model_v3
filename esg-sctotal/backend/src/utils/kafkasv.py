@@ -7,7 +7,13 @@ from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 
 from src.utils.settings import settings, safePrint
 import src.utils.dbClient as db
-from src.utils.agentPipeline import buildSupplierAnswers, runComplianceAuditAgent
+
+# agentPipeline.py 모듈로부터 수치 정제 엔진 및 독립 분리된 두 함수 임포트
+from src.utils.agentPipeline import (
+    buildSupplierAnswers, 
+    executeComplianceAudit, 
+    generateSelfAssessReport
+)
 
 # Kafka Producer 설정
 kafkaProducer = KafkaProducer(
@@ -71,27 +77,59 @@ async def handleEmailJob(data):
     else:
         print(f"알 수 없는 이메일: {email}")
 
-async def handleSelfAssessJob(data):
+def handleSelfAssessJob(payload: dict):
     """
-    자가진단 처리 핸들러
-    data 예시: {"partner_id": "AL-001", "version": 2, "answers": [...]}
+    FastAPI(Swagger) 업로드 API가 던진 이벤트를 Kafka 토픽에서 감지하여
+    E2E 백그라운드 AI 감사 파이프라인과 종합 서술 보고서 작성을 원스톱으로 처리합니다.
     """
-    partnerId = data.get("partner_id")
-    answers = data.get("answers", [])
-    if not partnerId or not answers:
-        print(f"[handleSelfAssessJob] 유효하지 않은 데이터 누락: partnerId={partnerId}, answers={len(answers)}")
+    partner_id = payload.get("partner_id")
+    version = payload.get("version", 1)
+    
+    safePrint(f"\n[⚡ Kafka Consumer Engine] 협력사 [{partner_id}] (v{version}) 자가진단 파일 분석 트리거 포착.")
+    
+    if not partner_id:
+        safePrint("[!] 경고: payload 구조 내에 partner_id 누락으로 잡 실행이 불가합니다.")
         return
 
     try:
-        from agentPipeline import buildSupplierAnswers, runComplianceAuditAgent
-        # answers 리스트 구조를 dictionary 구조로 정제
-        supplierAnswers = buildSupplierAnswers(answers)
+        # 1. dbClient를 활용해 사용자가 업로드하고 OCR이 완료한 실제 답변셋 전체 수집
+        select_answers_sql = """
+            SELECT indicator_no, answer_text 
+            FROM `SELF_ASSESS_ANSWER` 
+            WHERE partner_id = %s AND version = %s AND delete_yn = 0
+        """
+        raw_answers = db.findAll(select_answers_sql, (partner_id, version))
         
-        # 동적 AI 지표 실사 및 알림 발송 에이전트 구동
-        runComplianceAuditAgent(partnerId, supplierAnswers)
-        print(f"[handleSelfAssessJob 성공] partnerId={partnerId} AI 자가진단 평가 완료.")
-    except Exception as ex:
-        print(f"[handleSelfAssessJob 오류] {ex}")
+        if not raw_answers:
+            safePrint(f"[!] 경고: DB 내에 협력사 [{partner_id}]의 자가진단 응답 데이터가 식별되지 않아 프로세스를 마감합니다.")
+            return
+            
+        safePrint(f"[*] DB 마스터로부터 {len(raw_answers)}개의 문항 답변 셋 로드 완료. 가드레일 정제 진입.")
+
+        # 2. load.py 알고리즘 기반 서술형 문맥 수치 클렌징 (예: 문장 전체 -> float(1.25) 단일 추출)
+        cleaned_supplier_answers = buildSupplierAnswers(raw_answers)
+
+        # ─────────────────────────────────────────────────────────────
+        # 🚀 [기능 1 호출]: agentPipeline 고유 규칙 감사 파이프라인 가동
+        # ─────────────────────────────────────────────────────────────
+        # 내부적으로 위반 검출, AI_AGENT_ALERT/ALARM 적재, 위험군 업데이트, WebSocket 푸시 전동 가동
+        run_id = executeComplianceAudit(partner_id, cleaned_supplier_answers)
+        
+        # ─────────────────────────────────────────────────────────────
+        # 🚀 [기능 2 호출]: 기존 main.py 고유 자연어 서술 요약 종합 보고서 생성
+        # ─────────────────────────────────────────────────────────────
+        markdown_report = generateSelfAssessReport(partner_id, cleaned_supplier_answers)
+        
+        # 3. 생성된 종합 보고서 활용부 (콘솔 출력 및 시스템 아카이빙 로깅)
+        safePrint(f"\n====================================================================")
+        safePrint(f"🎉 [AI 에이전트 분석 완료 - Run ID: {run_id}] 실전 데이터 종합 리포팅 요약")
+        safePrint(f"====================================================================")
+        # 앞부분 400자만 요약 뷰 로깅 출력
+        safePrint(markdown_report[:400] + "\n\n... (이하 생략) ...")
+        safePrint(f"====================================================================\n")
+
+    except Exception as err:
+        safePrint(f"[!] Kafka 백그라운드 핸들러 실행 과정 중 치명적 예외 발생: {err}")
 
 # Consumer 함수
 def runEmailConsumer():
@@ -126,3 +164,17 @@ def startConsumer():
     
     selfAssessThread = threading.Thread(target=runSelfAssessConsumer, daemon=True)
     selfAssessThread.start()
+
+# src/utils/kafkasv.py 맨 아래 실행부 예시
+if __name__ == "__main__":
+    from src.utils.agentPipeline import syncOntologyRulesToDb
+    
+    safePrint("=========================================================")
+    safePrint("🚀 Kafka 백그라운드 워커 데몬 가동 프로세스 시작")
+    safePrint("=========================================================")
+    
+    # [정리된 함수 호출] 서버 켜질 때 로컬의 최신 룰셋 파일(.jsonl)을 DB에 동기화
+    syncOntologyRulesToDb("./esgOntologyTemplate.jsonl")
+    
+    # Kafka 컨슈머 루프 가동
+    # runSelfAssessConsumer()

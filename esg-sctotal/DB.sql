@@ -144,6 +144,7 @@ CREATE TABLE `COMPANY` (
   -- ✗ deforest_note 삭제 (v0.4)
   cert_count     INT          DEFAULT 0               COMMENT '보유 인증 수',
   status         VARCHAR(20)  DEFAULT 'ACTIVE'        COMMENT '상태',
+  is_registered  TINYINT(1)   NOT NULL DEFAULT 0        COMMENT '등록 완료 여부 (0=초대만, 1=등록 완료→재접속 시 2차 인증)',
   delete_yn      TINYINT(1)   NOT NULL DEFAULT 0      COMMENT '삭제 여부',
   created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '생성일시',
   updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '수정일시',
@@ -447,9 +448,9 @@ CREATE TABLE `AI_AGENT_ALERT` (
   alert_content     TEXT                                 COMMENT '알림 본문',
   regulation        VARCHAR(100)                         COMMENT '관련 규제',
   status            VARCHAR(20)  DEFAULT 'OPEN'          COMMENT '상태',
-  acknowledged_by   BIGINT                               COMMENT '확인자 ID',
+  acknowledged_by   VARCHAR(20)                          COMMENT '확인 본사/원청사 코드',
   acknowledged_at   DATETIME                             COMMENT '확인 일시',
-  resolved_by       BIGINT                               COMMENT '해소자 ID',
+  resolved_by       VARCHAR(20)                          COMMENT '해소 본사/원청사 코드',
   resolved_at       DATETIME                             COMMENT '해소 일시',
   resolution_note   TEXT                                 COMMENT '해소 비고',
   alarm_id          BIGINT                               COMMENT 'ALARM 연동 ID',
@@ -620,7 +621,27 @@ CREATE TABLE `AI_LOGS` (
 COMMENT='AI 수치 판정 및 매칭 이력 로그';
 
 -- ══════════════════════════════════════════════════════════
--- S13. ★ 공장 관리 (1)
+-- S14. ★ 초대 메시지 관리 (1)
+-- ══════════════════════════════════════════════════════════
+
+DROP TABLE IF EXISTS `INVITATION_MESSAGE`;
+CREATE TABLE `INVITATION_MESSAGE` (
+    `id`              BIGINT(20)    NOT NULL AUTO_INCREMENT   COMMENT '고유 ID',
+    `role_code`       VARCHAR(20)   NOT NULL                  COMMENT '초대사 권한 코드 (OEM/TIER1/TIER2)',
+    `message_subject` VARCHAR(50)   NOT NULL                  COMMENT '협력사별 초대 제목',
+    `sent_message`    TEXT          NULL                      COMMENT '초대사 화면 노출용 안내 메시지'      COLLATE 'utf8mb4_unicode_ci',
+    `message_content` TEXT          NOT NULL                  COMMENT '피초대 협력사 수신용 메시지 본문'    COLLATE 'utf8mb4_unicode_ci',
+    `created_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP                                    COMMENT '생성일시',
+    `updated_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP        COMMENT '수정일시',
+    `delete_yn`       TINYINT(1)    NULL     DEFAULT '0'      COMMENT '삭제여부',
+    PRIMARY KEY (`id`) USING BTREE,
+    INDEX `FK_IM_ROLE` (`role_code`) USING BTREE
+) COMMENT='초대 메시지 관리 — 권한별 초대 제목·본문 마스터'
+COLLATE='utf8mb4_unicode_ci' ENGINE=InnoDB;
+
+
+-- ══════════════════════════════════════════════════════════
+-- S15. ★ 공장 관리 (1)
 -- ══════════════════════════════════════════════════════════
 
 DROP TABLE IF EXISTS `FACTORY`;
@@ -663,6 +684,31 @@ CREATE TABLE IF NOT EXISTS `TOKEN` (
     INDEX `IDX_TOKEN_PARTNER` (`partner_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 COMMENT='로그인 토큰 관리 — partner_id 기준 JWT refresh token 저장';
+
+-- 10.14 INVITATION_MESSAGE 더미 데이터 (티어별 초대 메시지)
+INSERT INTO `INVITATION_MESSAGE` (`role_code`, `message_subject`, `sent_message`, `message_content`) VALUES
+-- 원청사(OEM) → 1차 협력사 초대
+('OEM',
+ '공급망 맵 초대',
+ '원청사(가공·알루미늄 부품 제조) 기준에 부합하는 1차 협력사를 초대해 주시면 됩니다. 알루미늄 합금(Al 3003) 가공, 압연, 열처리 등의 공정 역량을 보유한 기업을 대상으로 해주세요.',
+ '귀사는 1차(알루미늄(3003) 합금 주조·가공·압연) 협력사로 초대되었습니다. ESG 공급망 관리 시스템에 접속하셔서 기업 기본 정보, Scope 1·2 GHG 배출량, 글로벌 인증(ISO 14001, IATF 16949 등) 현황, 자가진단 체크리스트 및 관련 증빙 서류를 등록하여 주시기 바랍니다.'
+),
+-- 1차 협력사(TIER1) → 2차 협력사 초대
+('TIER1',
+ '협력사 및 공급망 맵 초대',
+ '1차 협력사(알루미늄(3003) 합금 주조) 기준에 부합하는 2차 협력사를 초대해 주시면 됩니다. 알루미늄 1차 잉곳 제련, Hall-Héroult 전해 제련 역량을 보유한 기업을 대상으로 해주세요.',
+ '귀사는 2차(알루미늄 1차 잉곳 제련·Hall-Héroult 전해 공정) 협력사로 초대되었습니다. ESG 공급망 관리 시스템에 접속하셔서 전력 탄소집약도, PFC 가스 배출량, 에너지 원단위, FEOC 제련소 지분 구조 등의 ESG 항목과 자가진단 체크리스트 및 필요한 증빙 서류를 등록하여 주시기 바랍니다.'
+),
+-- 2차 협력사(TIER2) → 3차 협력사 초대
+('TIER2',
+ '협력사 및 공급망 맵 초대',
+ '2차 협력사(알루미늄 1차 잉곳 제련) 기준에 부합하는 3차 협력사를 초대해 주시면 됩니다. 보크사이트(Al) 채굴, 알루미나(Al₂O₃) 정제, 망간(Mn) 광석 채굴 역량을 보유한 기업을 대상으로 해주세요.',
+ '귀사는 3차(보크사이트(Al) 채굴, 알루미나(Al₂O₃) 정제, 파이롤루사이트(Mn) 채굴) 협력사로 초대되었습니다. ESG 공급망 관리 시스템에 접속하셔서 아동·강제노동 Zero 현황, 산업안전 TRIR, FPIC 원주민 동의, 수질 중금속 농도, 토양 복원 계획 등의 ESG 항목과 자가진단 체크리스트 및 필요한 증빙 서류를 등록하여 주시기 바랍니다.'
+);
+
+-- 10.15 기존 COMPANY 더미 데이터 is_registered=1 업데이트
+UPDATE `COMPANY` SET is_registered = 1 WHERE delete_yn = 0;
+
 
 SET FOREIGN_KEY_CHECKS = 1;
 
@@ -781,7 +827,7 @@ INSERT INTO `ESG_RISK_CRITERIA` (item_name,high_risk,medium_risk,low_risk) VALUE
 
 
 -- ╔══════════════════════════════════════════════════════════════════╗
--- ║  📊 DB v0.5 통계 — 총 30개 테이블 (UPPER_CASE 통일)                ║
+-- ║  📊 DB v0.5 통계 — 총 31개 테이블 (UPPER_CASE 통일)                ║
 -- ║  ─────────────────────────────────────────────                    ║
 -- ║  S1. 사용자·권한·메뉴·알림     : 5개                               ║
 -- ║  S2. 기업·초대                 : 2개                               ║
@@ -796,6 +842,7 @@ INSERT INTO `ESG_RISK_CRITERIA` (item_name,high_risk,medium_risk,low_risk) VALUE
 -- ║  S11. 파일 관리                : 2개 (LICENSE_FILE/SUPPORTING)     ║
 -- ║  S12. ★ AI 판정 로그           : 1개 (AI_LOGS)                    ║
 -- ║  S13. ★ 공장관리               : 1개 (FACTORY)                    ║
--- ║  S14. 토큰(로그인 기록)          : 1개 (TOKEN)                      ║
+-- ║  S14. ★ 초대 메시지 관리         : 1개 (INVITATION_MESSAGE)         ║
+-- ║  S15. 토큰(로그인 기록)          : 1개 (TOKEN)                      ║
 -- ║                                                                  ║
 -- ╚══════════════════════════════════════════════════════════════════╝

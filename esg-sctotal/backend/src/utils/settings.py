@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     # ➕ [AI 엔진에서 이식] Models & Ollama / HuggingFace
     # --------------------------
     ollama_host: str
-    mariadb_ollama_model: str
+    ai_model: str
     embed_model: str 
     rerank_model: str 
     hf_repo: str

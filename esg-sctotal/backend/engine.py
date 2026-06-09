@@ -511,7 +511,7 @@ def processEsgComplianceQuery(userQuery: str, partnerName: str) -> dict:
         f"위 데이터와 지침을 기초로 협력사 감사 리포트를 Markdown 양식으로 구성해 주세요."
     )
     
-    targetModel = settings.mariadb_ollama_model    
+    targetModel = settings.ai_model    
     try:
         aiResp = ollamaClient.generate(model=targetModel, prompt=prompt)["response"]
     except Exception as e:

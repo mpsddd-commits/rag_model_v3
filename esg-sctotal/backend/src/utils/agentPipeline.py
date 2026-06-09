@@ -10,6 +10,117 @@ import src.utils.dbClient as db
 from src.utils.settings import settings, safePrint
 
 # =====================================================================
+# [공통 헬퍼] load.py 구조 기반 서술형 문장 내 수치 자동 정제 함수
+# =====================================================================
+def extractNumericValueFromText(text: str):
+    """
+    load.py의 parseComplexCriteria 기법을 적용하여 제품명/규격번호(4자리 숫자 등)를 필터링하고
+    문장 내에서 '1.25'와 같은 핵심 실수(float) 데이터를 안전하게 추출합니다.
+    """
+    if not text:
+        return None
+
+    # 1. 전처리 가드레일: 의도치 않은 메타 숫자(4자리 제품명 3003, ASTM B209 등) 클렌징
+    cleanText = re.sub(r"\b\d{4}\b", "", text)
+    cleanText = re.sub(r"B\d+", "B", cleanText)
+
+    # 2. 퍼센트 기호(%)가 붙어 있는 핵심 기입 데이터를 우선 포착
+    percentMatch = re.search(r"(\d+\.\d+|\d+)\s*%", cleanText)
+    if percentMatch:
+        return float(percentMatch.group(1))
+
+    # 3. 일반적인 수치 정규식 탐색
+    nums = re.findall(r"\d+\.\d+|\d+", cleanText)
+    if nums:
+        return float(nums[0])
+        
+    return None
+
+def buildSupplierAnswers(answers: list) -> dict:
+    """
+    DB에서 가져온 raw 답변 리스트를 수치 추출 가드레일을 거쳐 
+    AI 룰 엔진이 즉시 매칭할 수 있는 딕셔너리 구조로 변환합니다.
+    """
+    supplierAnswers = {}
+    for ans in answers:
+        ino = ans.get("indicator_no")
+        text = str(ans.get("answer_text", "")).strip()
+        
+        # 원본 텍스트 매핑 백업 (기본 폴백용)
+        supplierAnswers[str(ino)] = text
+        supplierAnswers[ino] = text
+        
+        # 통합 수치 전처리 레이어 가동
+        extracted_num = extractNumericValueFromText(text)
+        if extracted_num is not None:
+            supplierAnswers[str(ino)] = extracted_num
+            supplierAnswers[ino] = extracted_num
+            
+    return supplierAnswers
+
+# def buildSupplierAnswers(answers: list) -> dict:
+#     """
+#     자가진단 답변 목록을 AI 룰 엔진이 매칭할 수 있는 supplierAnswers 딕셔너리로 변환합니다.
+#     수치 추출 및 서브 지표(PAH, 다이옥신, 중금속 등) 동적 파싱을 수행합니다.
+#     """
+#     supplierAnswers = {}
+#     for ans in answers:
+#         ino = ans.get("indicator_no")
+#         text = str(ans.get("answer_text", "")).strip()
+        
+#         # 기본 매핑
+#         supplierAnswers[str(ino)] = text
+#         supplierAnswers[ino] = text
+        
+#         # 특정 지표의 경우 sub_id로 파싱하여 추가 매핑
+#         # 예: 35번 지표 (PAH / DIOXIN)
+#         if ino == 35:
+#             pah_match = re.search(r'PAH\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
+#             dioxin_match = re.search(r'(?:DIOXIN|다이옥신)\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
+#             if pah_match:
+#                 supplierAnswers["PAH"] = float(pah_match.group(1))
+#             if dioxin_match:
+#                 supplierAnswers["DIOXIN"] = float(dioxin_match.group(1))
+                
+#         # 예: 8번 지표 (AS / CD / PB)
+#         elif ino == 8:
+#             as_match = re.search(r'(?:AS|비소)\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
+#             cd_match = re.search(r'(?:CD|카드뮴)\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
+#             pb_match = re.search(r'(?:PB|납)\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
+#             if as_match:
+#                 supplierAnswers["AS"] = float(as_match.group(1))
+#             if cd_match:
+#                 supplierAnswers["CD"] = float(cd_match.group(1))
+#             if pb_match:
+#                 supplierAnswers["PB"] = float(pb_match.group(1))
+                
+#         # 예: 9번 지표 (AL2O3 / SIO2)
+#         elif ino == 9:
+#             al_match = re.search(r'Al2O3\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
+#             si_match = re.search(r'SiO2\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
+#             if al_match:
+#                 supplierAnswers["AL2O3"] = float(al_match.group(1))
+#             if si_match:
+#                 supplierAnswers["SIO2"] = float(si_match.group(1))
+                
+#         # 예: 19번 지표 (IAI_SGA / NA2O)
+#         elif ino == 19:
+#             sga_match = re.search(r'(?:IAI_SGA|순도)\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
+#             na2o_match = re.search(r'Na2O\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
+#             if sga_match:
+#                 supplierAnswers["IAI_SGA"] = float(sga_match.group(1))
+#             if na2o_match:
+#                 supplierAnswers["NA2O"] = float(na2o_match.group(1))
+                
+#         extracted_num = extractNumericValueFromText(text)
+#         if extracted_num is not None:
+#             # 장문의 서술형 문장 대신 "1.25" 같은 깔끔한 float 수치로 오버라이드합니다.
+#             supplierAnswers[str(ino)] = extracted_num
+#             supplierAnswers[ino] = extracted_num
+            
+#     return supplierAnswers
+
+# =====================================================================
 # 1. esgOntologyTemplate.jsonl 명세를 AI_AGENT_RULE 마스터 테이블에 적재 (Upsert)
 # =====================================================================
 def syncOntologyRulesToDb(jsonlPath="./esgOntologyTemplate.jsonl"):
@@ -26,13 +137,14 @@ def syncOntologyRulesToDb(jsonlPath="./esgOntologyTemplate.jsonl"):
     # SELF_ASSESS_CHECKLIST 테이블로부터 지표별 마스터 메타 정보 로드
     indicatorMetaMap = {}
     try:
-        mappingRows = db.findAll("SELECT indicator_no, partner_type, category FROM SELF_ASSESS_CHECKLIST")
+        mappingRows = db.findAll("SELECT indicator_no, partner_type, category, priority FROM SELF_ASSESS_CHECKLIST")
         for row in mappingRows:
             ino = row["indicator_no"]
             if ino not in indicatorMetaMap:
                 indicatorMetaMap[ino] = {
                     "partner_type": row["partner_type"],
-                    "category": row["category"]
+                    "category": row["category"],
+                    "priority": str(row["priority"]).strip().upper() if row.get("priority") else "WARN"
                 }
         safePrint(f"[*] [매핑 동기화] SELF_ASSESS_CHECKLIST로부터 {len(indicatorMetaMap)}개의 원천 지표 메타데이터를 캐싱했습니다.")
     except Exception as e:
@@ -98,10 +210,11 @@ def syncOntologyRulesToDb(jsonlPath="./esgOntologyTemplate.jsonl"):
                     indicator_no = data["indicator_no"]
                     sub_id = data.get("sub_id", "MAIN")
                     
-                    metaInfo = indicatorMetaMap.get(indicator_no, {"partner_type": "3차 적용", "category": "기타"})
+                    metaInfo = indicatorMetaMap.get(indicator_no, {"partner_type": "3차 적용", "category": "기타", "priority": "WARN"})
                     db_category = metaInfo["category"]
                     db_tier_scope = metaInfo["partner_type"]
-                    
+                    db_severity = metaInfo["priority"] if metaInfo["priority"] in ["CRITICAL", "HIGH", "MEDIUM"] else "WARN"
+
                     rule_code = f"RULE_{str(indicator_no).zfill(3)}"
                     if sub_id != "MAIN":
                         rule_code += f"_{sub_id}"
@@ -143,9 +256,9 @@ def syncOntologyRulesToDb(jsonlPath="./esgOntologyTemplate.jsonl"):
                         op,                           
                         db_threshold,                 
                         f"기준 스펙 범주 이탈 ({op} {db_threshold})", 
-                        "WARN",                       
+                        db_severity,                       
                         data["action_plan"],
-                        db_regulation # 13번째 변수: regulation 컬럼 바인딩 추가
+                        db_regulation 
                     )
                     recordsToInsert.append(record)
 
@@ -170,125 +283,29 @@ def syncOntologyRulesToDb(jsonlPath="./esgOntologyTemplate.jsonl"):
     finally:
         if conn and conn.open:
             conn.close()
-def extractNumericValueFromText(text: str):
-    """
-    load.py의 parseComplexCriteria 알고리즘을 기반으로 가공됨.
-    문장 내 불필요한 제품명/규격번호(4자리 숫자 등)를 필터링하고
-    질문하신 '1.25'와 같은 알짜배기 실수(float) 데이터를 강제 추출합니다.
-    """
-    if not text:
-        return None
-
-    # 1. 전처리 가드레일: 의도치 않은 메타 숫자(4자리 제품명, ASTM 규격 번호 등) 임시 제거
-    cleanText = re.sub(r"\b\d{4}\b", "", text)  # 4자리 숫자(3003 등) 제거
-    cleanText = re.sub(r"B\d+", "B", cleanText) # B209 등 규격명 뒤의 숫자 제거
-
-    # 2. 범위형 수치 구조가 먼저 발견되는 경우 (예: 1.00~1.50) 대표값으로 첫 번째 값 타겟팅 방지용
-    # 여기서는 "Mn 함량은 1.25%로... 기준(1.00~1.50%)" 일 때, 
-    # 본인의 실제 '함량' 수치인 앞쪽 숫자를 먼저 캐치하기 위해 단일 수치 패턴을 우선 탐색하거나
-    # 문맥 안에서 '%'가 붙어 있는 본인 응답 데이터를 우선 타겟팅합니다.
-    percentMatch = re.search(r"(\d+\.\d+|\d+)\s*%", cleanText)
-    if percentMatch:
-        return float(percentMatch.group(1))
-
-    # 3. 일반적인 수치 정규식 풀링
-    nums = re.findall(r"\d+\.\d+|\d+", cleanText)
-    if nums:
-        return float(nums[0])
-        
-    return None
-
-
-def buildSupplierAnswers(answers: list) -> dict:
-    """
-    자가진단 답변 목록을 AI 룰 엔진이 매칭할 수 있는 supplierAnswers 딕셔너리로 변환합니다.
-    수치 추출 및 서브 지표(PAH, 다이옥신, 중금속 등) 동적 파싱을 수행합니다.
-    """
-    supplierAnswers = {}
-    for ans in answers:
-        ino = ans.get("indicator_no")
-        text = str(ans.get("answer_text", "")).strip()
-        
-        # 기본 매핑
-        supplierAnswers[str(ino)] = text
-        supplierAnswers[ino] = text
-        
-        # 특정 지표의 경우 sub_id로 파싱하여 추가 매핑
-        # 예: 35번 지표 (PAH / DIOXIN)
-        if ino == 35:
-            pah_match = re.search(r'PAH\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
-            dioxin_match = re.search(r'(?:DIOXIN|다이옥신)\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
-            if pah_match:
-                supplierAnswers["PAH"] = float(pah_match.group(1))
-            if dioxin_match:
-                supplierAnswers["DIOXIN"] = float(dioxin_match.group(1))
-                
-        # 예: 8번 지표 (AS / CD / PB)
-        elif ino == 8:
-            as_match = re.search(r'(?:AS|비소)\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
-            cd_match = re.search(r'(?:CD|카드뮴)\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
-            pb_match = re.search(r'(?:PB|납)\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
-            if as_match:
-                supplierAnswers["AS"] = float(as_match.group(1))
-            if cd_match:
-                supplierAnswers["CD"] = float(cd_match.group(1))
-            if pb_match:
-                supplierAnswers["PB"] = float(pb_match.group(1))
-                
-        # 예: 9번 지표 (AL2O3 / SIO2)
-        elif ino == 9:
-            al_match = re.search(r'Al2O3\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
-            si_match = re.search(r'SiO2\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
-            if al_match:
-                supplierAnswers["AL2O3"] = float(al_match.group(1))
-            if si_match:
-                supplierAnswers["SIO2"] = float(si_match.group(1))
-                
-        # 예: 19번 지표 (IAI_SGA / NA2O)
-        elif ino == 19:
-            sga_match = re.search(r'(?:IAI_SGA|순도)\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
-            na2o_match = re.search(r'Na2O\s*:?\s*(\d+\.?\d*)', text, re.IGNORECASE)
-            if sga_match:
-                supplierAnswers["IAI_SGA"] = float(sga_match.group(1))
-            if na2o_match:
-                supplierAnswers["NA2O"] = float(na2o_match.group(1))
-                
-        extracted_num = extractNumericValueFromText(text)
-        if extracted_num is not None:
-            # 장문의 서술형 문장 대신 "1.25" 같은 깔끔한 float 수치로 오버라이드합니다.
-            supplierAnswers[str(ino)] = extracted_num
-            supplierAnswers[ino] = extracted_num
-            
-    return supplierAnswers
-
 
 # =====================================================================
-# 2. 공급망 ESG 자가진단 위반 탐지 및 감사 결과 실시간 감사 에이전트 구동
+# 📌 [함수 1] AI 자동 감사 가동 및 실시간 알림/위험군 적재 함수
 # =====================================================================
-def runComplianceAuditAgent(partnerCode: str, supplierAnswers: dict):
+def executeComplianceAudit(partnerCode: str, supplierAnswers: dict):
     """
-    제공해주신 최신 AI_AGENT_RUN_LOG 및 AI_AGENT_ALERT 스키마 규격을 100% 반영한
-    공급망 ESG 위반 탐지 및 실시간 감사 에이전트 메인 엔진입니다.
+    규칙 기반 ESG 자가진단 위반 탐지 및 실시간 DB 적재/알림 마스터 파이프라인
+    - AI_AGENT_ALERT, ALARM 테이블 데이터 누적 적재
+    - COMPANY 위험군 등급 실시간 갱신 및 WebSocket 실시간 푸시 토글
     """
-    safePrint(f"\n[*] 협력사 [{partnerCode}] 공급망 ESG 자동 실사 에이전트 구동...")
-    
+    safePrint(f"\n[*] [AI 엔진] 협력사 [{partnerCode}] 공급망 ESG 규칙 검사 및 알림 파이프라인 가동...")
     startTime = time.time()
+    
     conn = db.getMariaConn()
     if not conn:
-        safePrint("[!] DB 커넥션 유실로 에이전트 구동 실패")
-        return
+        safePrint("[!] 에러: MariaDB 커넥션 유실로 감사 엔진 가동이 취소되었습니다.")
+        return None
 
     runId = None
-    rulesEvaluated = 0
-    alertsGenerated = 0
-    criticalCount = 0
-    failCount = 0
-    warnCount = 0
-
     try:
         cur = conn.cursor(dictionary=True)
         
-        # 1단계: AI_AGENT_RUN_LOG 마스터 로그 개시 (AUTO_INCREMENT이므로 run_id 제외하고 INSERT)
+        # 1. AI_AGENT_RUN_LOG 마스터 인스턴스 생성
         insertRunLogSql = """
             INSERT INTO `AI_AGENT_RUN_LOG` (
                 trigger_type, scope, scope_target, rules_evaluated, 
@@ -298,18 +315,21 @@ def runComplianceAuditAgent(partnerCode: str, supplierAnswers: dict):
         """
         cur.execute(insertRunLogSql, (partnerCode,))
         conn.commit()
-        
-        # 생성된 BIGINT run_id 식별자 추출
         runId = cur.lastrowid
         
-        # 2단계: 최신 활성화 온톨로지 마스터 규칙 로드 (AI_AGENT_RULE 구조와 매핑)
+        # 2. 마스터 규칙 로드 (active_yn = 'Y')
         cur.execute("SELECT * FROM `AI_AGENT_RULE` WHERE active_yn = 'Y'")
         ruleRows = cur.fetchall()
         rulesEvaluated = len(ruleRows)
         
         alertsToInsert = []
+        alertsGenerated = 0
+        criticalCount = 0
+        failCount = 0
+        warnCount = 0
+        actionPlans = []
         
-        # 3단계: 복합 연산 및 위반 심사 루프 작동
+        # 3. 위반 연산 루프
         for rule in ruleRows:
             ruleId = rule["rule_id"]
             ino = rule["indicator_no"]
@@ -319,7 +339,6 @@ def runComplianceAuditAgent(partnerCode: str, supplierAnswers: dict):
             th_str = rule["threshold_value"]
             severity_upper = rule["severity"].strip().upper()
             
-            # 유연한 멀티 파트 답변 매칭 메커니즘
             userValue = None
             if sub_id != "MAIN" and sub_id in supplierAnswers:
                 userValue = supplierAnswers[sub_id]
@@ -335,17 +354,15 @@ def runComplianceAuditAgent(partnerCode: str, supplierAnswers: dict):
             deviationPct = 0.0
             
             try:
-                if m_key == "NUMERIC" and userValue is not None:
+                if m_key == "NUMERIC":
                     floatUser = float(userValue)
                     floatThreshold = float(th_str)
-                    
                     if op == "<" and not (floatUser < floatThreshold): isViolated = True
                     elif op == "<=" and not (floatUser <= floatThreshold): isViolated = True
                     elif op == ">" and not (floatUser > floatThreshold): isViolated = True
                     elif op == ">=" and not (floatUser >= floatThreshold): isViolated = True
                     elif op == "==" and not (floatUser == floatThreshold): isViolated = True
                     
-                    # 수치형 지표 이탈 시 편차율(%) 연산 가공 (분모 0 방지)
                     if isViolated and floatThreshold != 0:
                         deviationPct = round(((floatUser - floatThreshold) / floatThreshold) * 100, 2)
                 
@@ -354,60 +371,45 @@ def runComplianceAuditAgent(partnerCode: str, supplierAnswers: dict):
                     if "Y" in op and normUser != "Y": isViolated = True
                     elif "N" in op and normUser != "N": isViolated = True
                     
-                elif m_key == "RANGE":
+                elif m_key == "RANGE" and "~" in th_str:
                     floatUser = float(userValue)
-                    if "~" in th_str:
-                        min_v, max_v = map(float, th_str.split("~"))
-                        if not (min_v <= floatUser <= max_v): 
-                            isViolated = True
-                            if min_v != 0 and floatUser < min_v:
-                                deviationPct = round(((floatUser - min_v) / min_v) * 100, 2)
-                            elif max_v != 0 and floatUser > max_v:
-                                deviationPct = round(((floatUser - max_v) / max_v) * 100, 2)
-
-            except (ValueError, TypeError):
+                    min_v, max_v = map(float, th_str.split("~"))
+                    if not (min_v <= floatUser <= max_v): 
+                        isViolated = True
+                        if min_v != 0 and floatUser < min_v:
+                            deviationPct = round(((floatUser - min_v) / min_v) * 100, 2)
+                        elif max_v != 0 and floatUser > max_v:
+                            deviationPct = round(((floatUser - max_v) / max_v) * 100, 2)
+            except:
                 isViolated = True
 
-            # 4단계: 위반 감지 시 AI_AGENT_ALERT 적재 구조 빌드
             if isViolated:
                 alertsGenerated += 1
-                if severity_upper == "CRITICAL":
-                    criticalCount += 1
-                elif severity_upper == "FAIL":
-                    failCount += 1
-                else:
-                    warnCount += 1
+                if severity_upper == "CRITICAL": criticalCount += 1
+                elif severity_upper == "FAIL": failCount += 1
+                else: warnCount += 1
                 
-                alertTitle = f"[공급망 실사 위반] {rule['rule_name']} 기준 미달 알림"
-                alertContent = (
-                    f"협력사 제출 응답값 '{userValue}'가 허용 합격 기준인 "
-                    f"[{op} {th_str}] 범위를 이탈하였습니다. 신속한 공급망 위험 조치가 필요합니다."
-                )
+                alertTitle = f"[공급망 실사 위반] {rule['rule_name']} 기준 미달"
+                alertContent = f"제출값 '{userValue}'가 허용 기준 [{op} {th_str}]을 벗어났습니다."
+                aiReasoning = f"평가 키 {m_key} 연산 결과, 임계치 위반 확정."
+                aiRecommendation = rule.get("action_required") or "개선조치 계획서(CAPA) 제출 요구"
                 
-                # AI 자동화 추론 데이터 세트 가공 매핑
-                aiReasoning = f"평가 키 {m_key} 연산 결과, 임계치 명세 범주를 위반한 것으로 확정 판정함."
-                aiRecommendation = rule.get("action_required") if rule.get("action_required") else "공급사 현장 실사 및 개선조치 계획서(CAPA) 제출을 즉시 요구하십시오."
+                alertsToInsert.append((
+                    ruleId, partnerCode, ino, m_key, str(userValue), th_str, 
+                    deviationPct, severity_upper, 95.50, aiReasoning, aiRecommendation, 
+                    alertTitle, alertContent, rule.get("regulation"), runId
+                ))
                 
-                alertRecord = (
-                    ruleId,
-                    partnerCode,        # partner_id 컬럼에 바인딩
-                    ino,                # indicator_no
-                    m_key,              # metric_key
-                    str(userValue),     # actual_value
-                    th_str,             # threshold_value
-                    deviationPct,       # deviation_pct
-                    severity_upper,     # severity
-                    95.50,              # ai_confidence
-                    aiReasoning,        # ai_reasoning
-                    aiRecommendation,   # ai_recommendation
-                    alertTitle,         # alert_title
-                    alertContent,       # alert_content
-                    rule.get("regulation"), # regulation
-                    runId               # run_id (BIGINT FK)
-                )
-                alertsToInsert.append(alertRecord)
+                actionPlans.append({
+                    "indicator_no": ino,
+                    "rule_name": rule["rule_name"],
+                    "severity": severity_upper,
+                    "actual_value": str(userValue),
+                    "threshold_value": th_str,
+                    "action_plan": aiRecommendation
+                })
 
-        # 5단계: 대량 위반 알림 벌크 인서트 수행
+        # 4. 위반 상세 내역 데이터 벌크 저장 (AI_AGENT_ALERT)
         if alertsToInsert:
             insertAlertSql = """
                 INSERT INTO `AI_AGENT_ALERT` (
@@ -419,204 +421,163 @@ def runComplianceAuditAgent(partnerCode: str, supplierAnswers: dict):
             """
             cur.executemany(insertAlertSql, alertsToInsert)
 
-        # 6단계: 트랜잭션 마감 및 AI_AGENT_RUN_LOG 종합 마스터 정보 실시간 업데이트
+        # 5. 실행 결과 요약 로그 마감
         durationMs = int((time.time() - startTime) * 1000)
         finalStatus = "SUCCESS" if alertsGenerated == 0 else "ALERT"
-        aiSummary = f"감사 에이전트가 총 {rulesEvaluated}개의 가드레일 룰셋을 기반으로 검증을 완료했습니다. 위반 알림 {alertsGenerated}건 발생."
+        aiSummary = f"총 {rulesEvaluated}개 마스터 규칙 대조 완료. 위반 {alertsGenerated}건 최종 판정."
         
-        updateRunLogSql = """
-            UPDATE `AI_AGENT_RUN_LOG` 
-            SET status = %s,
-                rules_evaluated = %s,
-                alerts_generated = %s,
-                critical_count = %s,
-                fail_count = %s,
-                warn_count = %s,
-                ai_model = 'Rule-Engine-v2',
-                ai_summary = %s,
-                duration_ms = %s,
-                ended_at = NOW()
-            WHERE run_id = %s
-        """
-        cur.execute(updateRunLogSql, (
-            finalStatus, rulesEvaluated, alertsGenerated, 
-            criticalCount, failCount, warnCount, aiSummary, durationMs, runId
-        ))
-        
-        conn.commit()
-        safePrint(f"[+] 에이전트 실사 완료 (Run ID: {runId} | 위반: {alertsGenerated}건 [Crit: {criticalCount}, Fail: {failCount}, Warn: {warnCount}] | 소요시간: {durationMs}ms)")
-
-        # 7단계: 위험군 산정 및 업데이트
-        if criticalCount > 0:
-            riskLevel = "고위험군"
-        elif failCount > 0 or warnCount > 0:
-            riskLevel = "중위험군"
-        else:
-            riskLevel = "저위험군"
-            
         cur.execute("""
-            UPDATE `COMPANY`
-            SET risk_level = %s
-            WHERE partner_id = %s AND delete_yn = 0
-        """, (riskLevel, partnerCode))
-        conn.commit()
-        safePrint(f"[*] [위험군 업데이트] partner_id={partnerCode} -> risk_level={riskLevel}")
-
-        # 8단계: 위험군 통계 산출 (고위험군/중위험군 수)
+            UPDATE `AI_AGENT_RUN_LOG` 
+            SET status = %s, rules_evaluated = %s, alerts_generated = %s,
+                critical_count = %s, fail_count = %s, warn_count = %s,
+                ai_model = 'Rule-Engine-v2-E2E', ai_summary = %s, duration_ms = %s, ended_at = NOW()
+            WHERE run_id = %s
+        """, (finalStatus, rulesEvaluated, alertsGenerated, criticalCount, failCount, warnCount, aiSummary, durationMs, runId))
+        
+        # 6. COMPANY 테이블 위험 등급 마이그레이션 갱신
+        riskLevel = "고위험군" if criticalCount > 0 else ("중위험군" if (failCount > 0 or warnCount > 0) else "저위험군")
+        cur.execute("UPDATE `COMPANY` SET risk_level = %s WHERE partner_id = %s AND delete_yn = 0", (riskLevel, partnerCode))
+        
+        # 7. 마스터 ALARM 테이블 최종 영구 적재 연동 (DBeaver 연동 확인용 핵심 코드)
+        alarm_level = "warn" if finalStatus == "ALERT" else "info"
+        if criticalCount > 0: alarm_level = "fail"
+        
+        insertAlarmSql = """
+            INSERT INTO `ALARM` (partner_id, type, level, title, content, path, meta_json, is_read, delete_yn, created_at)
+            VALUES (%s, 'AI_AGENT', %s, %s, %s, %s, %s, 0, 0, NOW())
+        """
+        
         cur.execute("SELECT COUNT(*) as cnt FROM `COMPANY` WHERE risk_level = '고위험군' AND delete_yn = 0")
         highRiskCount = cur.fetchone()["cnt"]
         cur.execute("SELECT COUNT(*) as cnt FROM `COMPANY` WHERE risk_level = '중위험군' AND delete_yn = 0")
         mediumRiskCount = cur.fetchone()["cnt"]
-
-        # 9단계: 각 진단 항목별 액션플랜 추출
-        cur.execute("""
-            SELECT rule_id, indicator_no, alert_title, alert_content, severity, ai_recommendation, threshold_value, actual_value
-            FROM `AI_AGENT_ALERT`
-            WHERE run_id = %s AND delete_yn = 0
-        """, (runId,))
-        alerts = cur.fetchall()
         
-        actionPlans = []
-        for alert in alerts:
-            cur.execute("SELECT rule_name FROM `AI_AGENT_RULE` WHERE rule_id = %s", (alert["rule_id"],))
-            rule_row = cur.fetchone()
-            rule_name = rule_row["rule_name"] if rule_row else f"지표 {alert['indicator_no']}"
-            
-            actionPlans.append({
-                "indicator_no": alert["indicator_no"],
-                "rule_name": rule_name,
-                "severity": alert["severity"],
-                "actual_value": alert["actual_value"],
-                "threshold_value": alert["threshold_value"],
-                "action_plan": alert["ai_recommendation"] or "공급사 현장 실사 및 개선조치 계획서(CAPA) 제출을 즉시 요구하십시오."
-            })
-
-        # 10단계: 원청사 식별 및 실시간 WebSocket 푸시
-        cur.execute("SELECT parent_id, company_name FROM `COMPANY` WHERE partner_id = %s AND delete_yn = 0", (partnerCode,))
-        partnerInfo = cur.fetchone()
-        partnerName = partnerInfo["company_name"] if partnerInfo else partnerCode
-        parentId = partnerInfo["parent_id"] if partnerInfo else None
-        
-        cur.execute("SELECT partner_id FROM `COMPANY` WHERE (tier = 0 OR tier_label = '원청사') AND delete_yn = 0")
-        primeRows = cur.fetchall()
-        primeIds = [row["partner_id"] for row in primeRows]
-        
-        targetPartnerIds = set(primeIds)
-        if parentId:
-            targetPartnerIds.add(parentId)
-
         wsMessage = {
-            "id": None,
-            "companyId": partnerCode,
-            "type": "AI_AGENT",
-            "title": f"🔴 [자가진단 완료] {partnerName} 감사 판정 - {'불합격' if alertsGenerated > 0 else '합격'}",
-            "content": f"총 {alertsGenerated}건 위반 감지. 고위험군: {highRiskCount}사, 중위험군: {mediumRiskCount}사",
-            "isRead": False,
-            "createdAt": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "time": "방금 전",
+            "title": f"🔴 [자가진단 완료] 감사 판정 - {'불합격' if alertsGenerated > 0 else '합격'}",
+            "content": f"위반 {alertsGenerated}건 발생. (고위험군: {highRiskCount}개사 / 중위험군: {mediumRiskCount}개사 관리 중)",
             "path": f"/esg/dashboard?partnerId={partnerCode}",
-            "meta": {
-                "partner_id": partnerCode,
-                "partner_name": partnerName,
-                "status": "불합격" if alertsGenerated > 0 else "합격",
-                "high_risk_count": highRiskCount,
-                "medium_risk_count": mediumRiskCount,
-                "action_plans": actionPlans
-            }
+            "meta": {"partner_id": partnerCode, "status": "불합격" if alertsGenerated > 0 else "합격", "action_plans": actionPlans}
         }
-        try:
-            # 알림 수준 정의 (위반 수위에 맞게 매핑)
-            alarm_level = "warn" if finalStatus == "ALERT" else "info"
-            if criticalCount > 0:
-                alarm_level = "fail"
-
-            insertAlarmSql = """
-                INSERT INTO `ALARM` (
-                    partner_id,
-                    type,
-                    level,
-                    title,
-                    content,
-                    path,
-                    meta_json,
-                    is_read,
-                    delete_yn,
-                    created_at
-                ) VALUES (%s, 'AI_AGENT', %s, %s, %s, %s, %s, 0, 0, NOW())
-            """
-            
-            # JSON 형태로 프론트엔드 호환용 메타데이터 정형화
-            alarm_meta_json = json.dumps(wsMessage["meta"], ensure_ascii=False)
-            
-            cur.execute(insertAlarmSql, (
-                partnerCode,            # partner_id (예: NSM-001)
-                alarm_level,            # level (fail/warn/info)
-                wsMessage["title"],     # title
-                wsMessage["content"],   # content
-                wsMessage["path"],      # path
-                alarm_meta_json         # meta_json (체크 제약조건 호환 유효 JSON)
-            ))
-            conn.commit()
-            safePrint(f"[+] [ALARM 테이블] AI 에이전트 알림 적재 성공 (partner_id={partnerCode})")
-            
-        except Exception as alarm_err:
-            safePrint(f"[!] [ALARM 테이블] 적재 중 오류 발생: {alarm_err}")
-
-
+        
+        cur.execute(insertAlarmSql, (
+            partnerCode, alarm_level, wsMessage["title"], wsMessage["content"], 
+            wsMessage["path"], json.dumps(wsMessage["meta"], ensure_ascii=False)
+        ))
+        conn.commit()
+        safePrint(f"[+] [ALARM 적재] AI 에이전트 실사 알림이 ALARM 테이블에 안전하게 적재되었습니다. (Run ID: {runId})")
+        
+        # 8. 실시간 프론트엔드 대시보드 푸시용 비동기 WebSocket 트리거
         from src.utils.websc import manager
-        
         async def sendWsAlerts():
-            for pId in targetPartnerIds:
-                if manager.isConnected(pId):
-                    await manager.sendToPartner(pId, wsMessage)
-                    safePrint(f"[WS 알림 송신 성공] target_partner_id={pId}")
-                    
+            if manager.isConnected(partnerCode):
+                await manager.sendToPartner(partnerCode, wsMessage)
         try:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.ensure_future(sendWsAlerts())
-                else:
-                    loop.run_until_complete(sendWsAlerts())
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(sendWsAlerts())
-        except Exception as ws_ex:
-            safePrint(f"[WS 알림 송신 에러] {ws_ex}")
+            asyncio.get_event_loop().run_until_complete(sendWsAlerts())
+        except:
+            pass
 
-    except mariadb.Error as err:
-        safePrint(f"[!] 에이전트 구동 중 치명적 장애 발생: {err}")
-        if conn and conn.open: 
-            conn.rollback()
-        
-        if runId and conn and conn.open:
-            try:
-                with conn.cursor() as errCur:
-                    durationMs = int((time.time() - startTime) * 1000)
-                    errCur.execute(
-                        "UPDATE `AI_AGENT_RUN_LOG` SET status = 'FAIL', error_message = %s, duration_ms = %s, ended_at = NOW() WHERE run_id = %s",
-                        (str(err), durationMs, runId)
-                    )
-                    conn.commit()
-            except:
-                pass
+        return runId
+    except mariadb.Error as e:
+        safePrint(f"[!] [에이전트 에러] 트랜잭션 오류 발생으로 롤백합니다: {e}")
+        if conn: conn.rollback()
+        return None
     finally:
-        if conn and conn.open:
-            conn.close()
+        if conn: conn.close()
 
 # =====================================================================
-# 3. 로컬 독립 검증 부문
+# 📌 [함수 2] 기존 main.py 스타일의 자가진단 텍스트 요약 보고서 생성 함수
 # =====================================================================
+def generateSelfAssessReport(partnerCode: str, supplierAnswers: dict) -> str:
+    """
+    [기존 main.py 서빙 로직 이식] 자가진단 정제 데이터 및 온톨로지 규칙을 결합하여
+    경영진 보고 및 화면 표출용 종합 진단서 요약 텍스트(마크다운 규격)를 생성합니다.
+    """
+    conn = db.getMariaConn()
+    if not conn:
+        return "DB 연결 실패로 텍스트 보고서를 바인딩할 수 없습니다."
+        
+    report_lines = []
+    try:
+        cur = conn.cursor(dictionary=True)
+        
+        cur.execute("SELECT company_name, risk_level FROM `COMPANY` WHERE partner_id = %s AND delete_yn = 0", (partnerCode,))
+        comp = cur.fetchone()
+        comp_name = comp["company_name"] if comp else partnerCode
+        risk_lvl = comp["risk_level"] if comp else "미정"
+
+        report_lines.append(f"# 📋 공급망 ESG 자가진단 종합 AI 실사 보고서")
+        report_lines.append(f"- **대상 협력사명**: {comp_name} ({partnerCode})")
+        report_lines.append(f"- **AI 리스크 등급**: **{risk_lvl}**")
+        report_lines.append(f"- **보고서 출력기준**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        report_lines.append(f"\n---\n")
+        
+        cur.execute("SELECT * FROM `AI_AGENT_RULE` WHERE active_yn = 'Y'")
+        rules = cur.fetchall()
+        
+        report_lines.append(f"## 📊 온톨로지 규칙 기반 가드레일 상세 대조 내역")
+        violation_count = 0
+        normal_count = 0
+        
+        for rule in rules:
+            ino = rule["indicator_no"]
+            sub_id = rule["sub_id"]
+            th_str = rule["threshold_value"]
+            op = rule["operator"]
+            m_key = rule["metric_key"]
+            
+            userValue = None
+            if sub_id != "MAIN" and sub_id in supplierAnswers:
+                userValue = supplierAnswers[sub_id]
+            elif str(ino) in supplierAnswers:
+                userValue = supplierAnswers[str(ino)]
+            elif ino in supplierAnswers:
+                userValue = supplierAnswers[ino]
+                
+            if userValue is None:
+                continue
+                
+            is_violated = False
+            try:
+                if m_key == "NUMERIC":
+                    if op == "<" and not (float(userValue) < float(th_str)): is_violated = True
+                    elif op == "<=" and not (float(userValue) <= float(th_str)): is_violated = True
+                    elif op == ">" and not (float(userValue) > float(th_str)): is_violated = True
+                    elif op == ">=" and not (float(userValue) >= float(th_str)): is_violated = True
+                    elif op == "==" and not (float(userValue) == float(th_str)): is_violated = True
+                elif m_key == "BOOL":
+                    if "Y" in op and str(userValue).strip().upper() != "Y": is_violated = True
+                    elif "N" in op and str(userValue).strip().upper() != "N": is_violated = True
+                elif m_key == "RANGE" and "~" in th_str:
+                    min_v, max_v = map(float, th_str.split("~"))
+                    if not (min_v <= float(userValue) <= max_v): is_violated = True
+            except:
+                is_violated = True
+                
+            status_tag = "🚨 [위반 감지]" if is_violated else "✅ [정상 기준 충족]"
+            if is_violated: violation_count += 1
+            else: normal_count += 1
+                
+            report_lines.append(
+                f"### {status_tag} 문항 {ino}. {rule['rule_name']}\n"
+                f"- **연계 글로벌 규제**: {rule.get('regulation') or '글로벌 일반 공급망 가이드라인'}\n"
+                f"- **실제 추출 데이터(Actual)**: `{userValue}`\n"
+                f"- **합격 임계 기준(Threshold)**: `{op} {th_str}`\n"
+            )
+            if is_violated:
+                report_lines.append(f"- **💡 추천 개선 조치 방안(CAPA)**: {rule.get('action_required')}\n")
+
+        report_lines.insert(4, f"## 📝 총평 및 AI 감사 종합 의견\n"
+                              f"본 협력사의 자가진단 문서를 파싱하여 정밀 분석한 결과, 총 {normal_count + violation_count}개 맵핑 문항 중 "
+                              f"**정상 반영 {normal_count}건**, **가드레일 위반 {violation_count}건**이 최종 발견되었습니다. "
+                              f"안전한 공급망 관리를 위해 위반 조치 방안 명세에 따라 시정 조치 계획서 작성을 권장합니다.\n")
+
+    except Exception as e:
+        report_lines.append(f"\n[!] 분석 과정 중 예외 발생: {e}")
+    finally:
+        if conn: conn.close()
+        
+    return "\n".join(report_lines)
+
 if __name__ == "__main__":
-    # 1단계: 규칙 원천 파일 로드 및 동기화 기동
-    syncOntologyRulesToDb("./esgOntologyTemplate.jsonl")
-    
-    # 2단계: 다중 서브 지표 처리가 포함된 가상의 답변집 테스트
-    mockSupplierData = {
-        "PAH": 12.5,     
-        "DIOXIN": 0.04,  
-        "36": "N"        
-    }
-    
-    runComplianceAuditAgent("PARTNER_HYUNDAI_01", mockSupplierData)
+    # 예시: 비동기 함수 실행 가동
+    asyncio.run(syncOntologyRulesToDb(jsonlPath="./esgOntologyTemplate.jsonl"))
